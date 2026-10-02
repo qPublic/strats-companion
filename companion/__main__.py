@@ -97,120 +97,29 @@ def follow(args):
         time.sleep(MATCH_POLL_SECONDS)
 
 
-def _frames(video, step):
-    """Frames to analyse: the live primary screen, or a video file sampled every `step` seconds."""
-    import cv2
-
-    from . import win
-
-    if video is None:
-        while True:
-            started = time.time()
-            yield win.capture_screen()
-            time.sleep(max(0.0, step - (time.time() - started)))
-    source = cv2.VideoCapture(video)
-    position = 0.0
-    while True:
-        source.set(cv2.CAP_PROP_POS_MSEC, position * 1000)
-        ok, frame = source.read()
-        if not ok:
-            return
-        yield frame
-        position += step
-
-
-def _same_spot(first, second, tolerance=2.0):
-    return first is not None and second is not None and geometry.distance(first, second) <= tolerance
-
-
 def run(args):
     """Watch the minimap and open the best post-plant lineup in Strats.gg whenever the spike is planted."""
-    from . import map_shape
-    from .minimap import MinimapReader
-    from .riot_local import NotAvailable, RiotClient
+    import threading
 
-    maps, agents = strats_api.maps(), strats_api.agents()
-    manual = args.map and args.agent
-    riot = None if manual else RiotClient()
+    from .watcher import Watcher
+
+    if bool(args.map) != bool(args.agent):
+        sys.exit("Give both --map and --agent, or neither.")
     if not args.dry_run:
         _ensure_strats(args.restart)
-    window = StratsWindow()
-    target = reader = lineups = groups = map_item = agent_item = None
-    last_match_check = 0.0
-    last_spike = last_player = opened = pending = None
-    print("Watching the minimap. Press Ctrl+C to stop.")
+    watcher = Watcher(
+        map_name=args.map, agent_name=args.agent, side=args.side,
+        drive=not args.dry_run, interval=args.interval, video=args.video,
+    )
+    print("Press Ctrl+C to stop.")
+    watcher.run(threading.Event())
 
-    for frame in _frames(args.video, args.interval):
-        if manual:
-            wanted = (args.map, args.agent, args.side or "attack")
-        elif time.time() - last_match_check >= MATCH_POLL_SECONDS:
-            last_match_check = time.time()
-            try:
-                match = riot.current_match()
-            except NotAvailable:
-                continue
-            found_map = next((item for item in maps if item["assetPath"].lower() == match["map_path"].lower()), None)
-            found_agent = next((item for item in agents if item["id"].lower() == match["agent_id"]), None)
-            if found_map is None or found_agent is None:
-                continue
-            wanted = (found_map["name"], found_agent["name"], args.side or match["side"])
-        elif target is None:
-            continue
-        else:
-            wanted = target
 
-        if wanted != target:
-            target = wanted
-            map_item = strats_api.find_by_name(maps, target[0])
-            agent_item = strats_api.find_by_name(agents, target[1])
-            if map_item is None or agent_item is None:
-                sys.exit(f"Unknown map or agent: {target[0]} / {target[1]}")
-            lineups = _approved(map_item, agent_item, target[2])
-            groups = geometry.group_lineups(lineups)
-            reader = MinimapReader(map_shape.silhouette(map_item, target[2]), frame.shape[0], MinimapReader.stored_scale(frame.shape))
-            opened = pending = None
-            print(f"Match: {map_item['name']} / {agent_item['name']} / {target[2]} ({len(lineups)} lineups)")
+def ui(args):
+    """Open the control window."""
+    from . import ui as window
 
-        if reader.scale is None:
-            score = reader.calibrate(frame)
-            if reader.scale is None:
-                continue
-            print(f"Minimap zoom calibrated ({reader.scale}, match score {score:.2f}).")
-
-        reading = reader.read(frame)
-        if reading.player is not None:
-            last_player = reading.player
-        if not reading.planted:
-            last_spike = None
-            if opened is not None:
-                opened = pending = None
-                print("Spike no longer planted.")
-            continue
-        if reading.spike is None:
-            continue
-        # Act only on a spike position seen in two reads in a row.
-        steady = _same_spot(reading.spike, last_spike)
-        last_spike = reading.spike
-        if not steady:
-            continue
-        lineup = selector.choose(lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item))
-        if lineup is None or lineup["id"] == opened:
-            continue
-        if lineup["id"] != pending:
-            pending = lineup["id"]
-            continue
-        opened = lineup["id"]
-        where = f"spike {reading.spike[0]:.0f},{reading.spike[1]:.0f}"
-        if last_player is not None:
-            where += f" / you {last_player[0]:.0f},{last_player[1]:.0f}"
-        print(f"Lineup: {lineup['title']} (#{lineup['id']}) for {where}")
-        if args.dry_run:
-            continue
-        try:
-            window.show_map(maps, agents, map_item, agent_item, target[2], groups)
-            window.open_lineup(groups, selector.group_of(groups, lineup), lineup)
-        except DriverError as error:
-            print(f"Strats.gg: {error}")
+    window.main()
 
 
 def capture(args):
@@ -260,6 +169,9 @@ def main():
     run_parser.add_argument("--dry-run", action="store_true", help="print the chosen lineups without touching Strats.gg")
     run_parser.set_defaults(run=run)
 
+    ui_parser = commands.add_parser("ui", help=ui.__doc__)
+    ui_parser.set_defaults(run=ui)
+
     capture_parser = commands.add_parser("capture", help=capture.__doc__)
     capture_parser.add_argument("--key", default="f9")
     capture_parser.set_defaults(run=capture)
@@ -267,18 +179,20 @@ def main():
     for sub in (launch_parser, show_parser, follow_parser, run_parser):
         sub.add_argument("--restart", action="store_true", help="restart Strats.gg if it is running without the keep-active switches")
 
-    # Double-clicking the exe gives no arguments: watch the game, restarting Strats.gg if needed.
-    double_clicked = len(sys.argv) == 1
-    args = parser.parse_args(["run", "--restart"] if double_clicked else None)
+    # Double-clicking the exe gives no arguments: open the window and hide the console behind it.
+    if len(sys.argv) == 1:
+        import ctypes
+
+        console = ctypes.windll.kernel32.GetConsoleWindow()
+        if console and getattr(sys, "frozen", False):
+            ctypes.windll.user32.ShowWindow(console, 0)
+        ui(None)
+        return
+    args = parser.parse_args()
     try:
         args.run(args)
     except KeyboardInterrupt:
         pass
-    except SystemExit as stop:
-        if double_clicked and stop.code:
-            print(stop.code)
-            input("Press Enter to close.")
-        raise
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ Tuned on 1080p match footage. Sizes scale with the calibrated minimap zoom.
 """
 
 import json
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import cv2
@@ -17,11 +18,14 @@ from .map_shape import VIEW_SIZE
 from .paths import CALIBRATION_FILE, DATA_DIR
 
 ROI_FRACTION = 0.48            # minimap lives in the top-left square of this fraction of screen height
-MIN_SCORE = 0.17               # real matches score 0.2+, a wrong zoom under 0.15, no minimap about 0.03
+MIN_SCORE = 0.13               # at the calibrated zoom: real matches 0.18+, no minimap under 0.07
+MIN_CALIBRATION_SCORE = 0.16   # a wrong zoom scores under 0.15
+TEMPLATE_CACHE = {0.25: 400, 0.5: 160, 1.0: 40}   # outlines kept per resolution
 COARSE_ANGLE_STEP = 3
 FINE_ANGLE_STEP = 0.75
 TRACK_ANGLE_RANGE = 9
-CALIBRATION_SCALES = np.arange(0.22, 0.66, 0.02)   # at 1080p; multiplied by height / 1080
+CALIBRATION_SCALES = np.arange(0.22, 0.90, 0.02)   # screen pixels per map view unit
+DEFAULT_SCALE = 0.405          # zoom seen with default minimap settings at both 1080p and 1440p
 LINE_THRESHOLD = 18
 ICON_RADIUS = 27.5             # player icon radius in map view units
 MIN_WHITE_RING = 0.35
@@ -75,6 +79,21 @@ def _line_map(image):
     return cv2.GaussianBlur((tophat > LINE_THRESHOLD).astype(np.float32), (0, 0), 1.2)
 
 
+class _Lines:
+    """Line maps of one minimap region, computed once per resolution."""
+
+    def __init__(self, roi):
+        self.roi = roi
+        self._levels = {}
+
+    def at(self, down):
+        if down not in self._levels:
+            image = self.roi if down == 1.0 else cv2.resize(self.roi, None, fx=down, fy=down, interpolation=cv2.INTER_AREA)
+            lines = _line_map(image)
+            self._levels[down] = (lines, float(lines.mean()))
+        return self._levels[down]
+
+
 class MinimapReader:
     def __init__(self, silhouette, frame_height, scale=None):
         self.silhouette = silhouette
@@ -94,22 +113,34 @@ class MinimapReader:
             return json.loads(CALIBRATION_FILE.read_text()).get(f"{frame_shape[1]}x{frame_shape[0]}")
         return None
 
-    def calibrate(self, frame):
-        """Find the minimap zoom from one frame that shows the minimap. Returns the match score."""
-        roi = self._roi(frame)
-        best = None
-        # Half-resolution scores barely separate zoom levels; the full-resolution score does.
-        for scale in CALIBRATION_SCALES * self.frame_height / 1080:
-            coarse = self._search(roi, float(scale), range(0, 360, COARSE_ANGLE_STEP), 0.5)
-            candidate = self._search(roi, float(scale), self._fine_angles(coarse.angle), 1.0)
-            if best is None or candidate.score > best.score:
-                best = candidate
-        for scale in (best.scale - 0.01, best.scale + 0.01):
-            candidate = self._search(roi, float(scale), self._fine_angles(best.angle), 1.0)
+    def calibrate(self, frame, thorough=True):
+        """Find the minimap zoom from one frame that shows the minimap. Returns the match score.
+
+        The quick passes cover the usual zoom and non-rotating minimaps in a few
+        seconds. `thorough` adds a sweep of every zoom at every rotation, which
+        takes a minute or two.
+        """
+        lines = _Lines(self._roi(frame))
+        best = self._locate(lines, DEFAULT_SCALE)
+        if best.score < MIN_CALIBRATION_SCORE:
+            for scale in CALIBRATION_SCALES:
+                upright = self._search(lines, float(scale), (0, 90, 180, 270), 0.25)
+                candidate = self._refine(lines, float(scale), upright.angle, upright.center)
+                if candidate.score > best.score:
+                    best = candidate
+        if best.score < MIN_CALIBRATION_SCORE and thorough:
+            for scale in CALIBRATION_SCALES:
+                candidate = self._locate(lines, float(scale))
+                if candidate.score > best.score:
+                    best = candidate
+        # The score peaks sharply at the true zoom, so finish with small steps around the best.
+        for scale in np.arange(best.scale - 0.015, best.scale + 0.0151, 0.005):
+            candidate = self._refine(lines, float(scale), best.angle, best.center)
             if candidate.score > best.score:
                 best = candidate
-        if best.score >= MIN_SCORE:
+        if best.score >= MIN_CALIBRATION_SCORE:
             self.scale = round(best.scale, 3)
+            self.last = None
             self._templates.clear()
             stored = json.loads(CALIBRATION_FILE.read_text()) if CALIBRATION_FILE.exists() else {}
             stored[f"{frame.shape[1]}x{frame.shape[0]}"] = self.scale
@@ -124,58 +155,83 @@ class MinimapReader:
         return frame[:side, :side]
 
     def _template(self, scale, angle, down):
-        key = (round(scale, 3), round(float(angle) % 360, 2), down)
-        if key not in self._templates:
-            size = max(8, int(round(VIEW_SIZE * scale * down)))
-            small = cv2.resize(self.silhouette, (size, size), interpolation=cv2.INTER_AREA)
-            outline = cv2.morphologyEx((small > 127).astype(np.uint8), cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
-            canvas = int(np.ceil(size * 1.42)) | 1
-            pad = (canvas - size) // 2
-            padded = np.zeros((canvas, canvas), np.float32)
-            padded[pad:pad + size, pad:pad + size] = outline
-            rotation = cv2.getRotationMatrix2D((canvas / 2, canvas / 2), float(angle), 1.0)
-            template = cv2.GaussianBlur(cv2.warpAffine(padded, rotation, (canvas, canvas)), (0, 0), 1.2)
-            if len(self._templates) > 400:
-                self._templates.clear()
-            self._templates[key] = (template, float(template.sum()))
-        return self._templates[key]
+        cache = self._templates.setdefault(down, OrderedDict())
+        key = (round(scale, 4), round(float(angle) % 360, 2))
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+        size = max(8, int(round(VIEW_SIZE * scale * down)))
+        small = cv2.resize(self.silhouette, (size, size), interpolation=cv2.INTER_AREA)
+        outline = cv2.morphologyEx((small > 127).astype(np.uint8), cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+        canvas = int(np.ceil(size * 1.42)) | 1
+        pad = (canvas - size) // 2
+        padded = np.zeros((canvas, canvas), np.float32)
+        padded[pad:pad + size, pad:pad + size] = outline
+        rotation = cv2.getRotationMatrix2D((canvas / 2, canvas / 2), float(angle), 1.0)
+        template = cv2.GaussianBlur(cv2.warpAffine(padded, rotation, (canvas, canvas)), (0, 0), 1.2)
+        cache[key] = (template, float(template.sum()))
+        if len(cache) > TEMPLATE_CACHE[down]:
+            cache.popitem(last=False)
+        return cache[key]
 
-    @staticmethod
-    def _fine_angles(angle):
-        return np.arange(angle - COARSE_ANGLE_STEP, angle + COARSE_ANGLE_STEP + 0.01, FINE_ANGLE_STEP)
+    def _search(self, lines, scale, angles, down, near=None, radius=0):
+        """Best placement of the outline over the frame's line map.
 
-    def _search(self, roi, scale, angles, down, lines=None):
-        if lines is None:
-            small = roi if down == 1.0 else cv2.resize(roi, None, fx=down, fy=down, interpolation=cv2.INTER_AREA)
-            lines = _line_map(small)
-        density = float(lines.mean())
+        With `near` (a full-resolution centre), only placements within `radius`
+        full-resolution pixels of it are tried, which is far cheaper.
+        """
+        image, density = lines.at(down)
         best = Registration(-1.0, scale, 0.0, (0.0, 0.0))
         for angle in angles:
             template, total = self._template(scale, angle, down)
             canvas = template.shape[0]
             margin = canvas // 2
-            padded = cv2.copyMakeBorder(lines, margin, margin, margin, margin, cv2.BORDER_CONSTANT, value=0)
+            padded = cv2.copyMakeBorder(image, margin, margin, margin, margin, cv2.BORDER_CONSTANT, value=0)
+            left = top = 0
+            if near is not None:
+                reach = max(1, int(round(radius * down)))
+                limit_x, limit_y = padded.shape[1] - canvas, padded.shape[0] - canvas
+                center_x = int(round(near[0] * down + margin - canvas / 2))
+                center_y = int(round(near[1] * down + margin - canvas / 2))
+                left, top = min(max(center_x - reach, 0), limit_x), min(max(center_y - reach, 0), limit_y)
+                right, bottom = min(max(center_x + reach, 0), limit_x), min(max(center_y + reach, 0), limit_y)
+                padded = padded[top:bottom + canvas, left:right + canvas]
             _, peak, _, location = cv2.minMaxLoc(cv2.matchTemplate(padded, template, cv2.TM_CCORR))
             score = peak / total - density
             if score > best.score:
-                center = ((location[0] - margin + canvas / 2) / down, (location[1] - margin + canvas / 2) / down)
+                center = ((location[0] + left - margin + canvas / 2) / down, (location[1] + top - margin + canvas / 2) / down)
                 best = Registration(score, scale, float(angle) % 360, center)
+        return best
+
+    def _refine(self, lines, scale, angle, center, spread=COARSE_ANGLE_STEP):
+        """Sharpen a rough placement: half resolution first, then full resolution."""
+        middle = self._search(lines, scale, np.arange(angle - spread, angle + spread + 0.01, 1.5), 0.5, center, 10)
+        fine_angles = np.arange(middle.angle - 1.5, middle.angle + 1.51, FINE_ANGLE_STEP)
+        return self._search(lines, scale, fine_angles, 1.0, middle.center, 3)
+
+    def _locate(self, lines, scale):
+        """Placement of the map with no prior knowledge of its rotation."""
+        # Fixed (non-rotating) minimaps sit at a right angle; try those before the full sweep.
+        upright = self._search(lines, scale, (0, 90, 180, 270), 0.25)
+        best = self._refine(lines, scale, upright.angle, upright.center)
+        if best.score >= MIN_CALIBRATION_SCORE:
+            return best
+        placements = [self._search(lines, scale, (angle,), 0.25) for angle in range(0, 360, COARSE_ANGLE_STEP)]
+        for coarse in sorted(placements, key=lambda item: item.score, reverse=True)[:3]:
+            candidate = self._refine(lines, scale, coarse.angle, coarse.center)
+            if candidate.score > best.score:
+                best = candidate
         return best
 
     def register(self, frame):
         """Screen-to-map transform for this frame, or None when no minimap is visible."""
-        roi = self._roi(frame)
-        half = _line_map(cv2.resize(roi, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA))
-        coarse = None
+        lines = _Lines(self._roi(frame))
+        found = None
         if self.last is not None:
-            nearby = np.arange(self.last.angle - TRACK_ANGLE_RANGE, self.last.angle + TRACK_ANGLE_RANGE + 0.1, COARSE_ANGLE_STEP)
-            coarse = self._search(roi, self.scale, nearby, 0.5, half)
-            if coarse.score < MIN_SCORE * 0.8:
-                coarse = None
-        if coarse is None:
-            coarse = self._search(roi, self.scale, range(0, 360, COARSE_ANGLE_STEP), 0.5, half)
-        fine = self._search(roi, self.scale, self._fine_angles(coarse.angle), 1.0)
-        self.last = fine if fine.score >= MIN_SCORE else None
+            found = self._refine(lines, self.scale, self.last.angle, self.last.center, TRACK_ANGLE_RANGE)
+        if found is None or found.score < MIN_SCORE:
+            found = self._locate(lines, self.scale)
+        self.last = found if found.score >= MIN_SCORE else None
         return self.last
 
     # ---- icons --------------------------------------------------------------

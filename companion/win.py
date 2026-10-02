@@ -23,6 +23,7 @@ user32.GetDC.restype = wintypes.HDC
 user32.GetDC.argtypes = [wintypes.HWND]
 user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
 user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 gdi32.CreateCompatibleDC.restype = wintypes.HDC
 gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
 gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
@@ -63,6 +64,16 @@ def find_windows(title):
 
     user32.EnumWindows(visit, 0)
     return found
+
+
+def set_topmost(hwnd, topmost):
+    """Pin a window above all others (or release it) without moving or focusing it."""
+    HWND_TOPMOST, HWND_NOTOPMOST = -1, -2
+    SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+    user32.SetWindowPos(
+        wintypes.HWND(hwnd), wintypes.HWND(HWND_TOPMOST if topmost else HWND_NOTOPMOST),
+        0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+    )
 
 
 def capture_window(hwnd):

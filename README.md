@@ -14,6 +14,14 @@ shows what it detects, a minimap preview with the matched outline, and a log. An
 `%LOCALAPPDATA%\StratsCompanion`. The exe is unsigned, so Windows SmartScreen
 will warn on first run.
 
+## Always on top
+
+Two checkboxes at the bottom of the window pin either the companion window or
+the Strats.gg window above everything else, including the game in Windowed
+Fullscreen. Keep a pinned window clear of the minimap (top left) and the round
+timer (top centre): the companion reads those from the screen and cannot see
+through a window covering them. Closing the companion releases Strats.gg.
+
 ## Updates
 
 The window checks GitHub for a newer release each time it opens and shows an

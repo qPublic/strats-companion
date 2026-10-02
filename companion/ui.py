@@ -12,6 +12,7 @@ import cv2
 
 from . import __version__, strats_api, updater, win
 from .paths import CAPTURE_DIR
+from .driver import WINDOW_TITLE as STRATS_TITLE
 from .watcher import PREVIEW_SIZE, Watcher
 
 AUTO = "Auto"
@@ -20,6 +21,7 @@ PANEL = "#1f2229"
 TEXT = "#e6e8ec"
 MUTED = "#8b919c"
 ACCENT = "#ff4655"
+STRATS_TOPMOST_REFRESH_MS = 3000
 STATE_ROWS = (("match", "Match"), ("minimap", "Minimap"), ("spike", "Spike"), ("player", "You"), ("lineup", "Lineup"))
 
 
@@ -60,6 +62,12 @@ class App:
         self.side_choice = self._combo(controls, "Side", [AUTO, "attack", "defense"], 2)
         self.drive = tk.BooleanVar(value=True)
         ttk.Checkbutton(controls, text="Open lineups in Strats.gg", variable=self.drive).grid(row=1, column=3, padx=(14, 0))
+        pins = ttk.Frame(root, padding=(14, 0, 14, 4))
+        pins.grid(row=3, column=0, columnspan=2, sticky="w")
+        self.pin_self = tk.BooleanVar(value=False)
+        self.pin_strats = tk.BooleanVar(value=False)
+        ttk.Checkbutton(pins, text="Keep this window on top", variable=self.pin_self, command=self.apply_pins).grid(row=0, column=0)
+        ttk.Checkbutton(pins, text="Keep Strats.gg on top", variable=self.pin_strats, command=self.apply_pins).grid(row=0, column=1, padx=(18, 0))
         self.toggle = ttk.Button(controls, text="Start", style="Accent.TButton", command=self.toggle_watching, width=10)
         self.toggle.grid(row=1, column=4, padx=(14, 0))
 
@@ -84,12 +92,13 @@ class App:
         self.preview.grid(row=1, column=1, padx=(0, 14), pady=6)
 
         self.log = tk.Text(root, height=8, width=92, bg=PANEL, fg=TEXT, bd=0, padx=8, pady=6, state="disabled", wrap="word")
-        self.log.grid(row=2, column=0, columnspan=2, padx=14, pady=(6, 14))
+        self.log.grid(row=2, column=0, columnspan=2, padx=14, pady=(6, 8))
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         updater.remove_previous()
         threading.Thread(target=self._check_update, daemon=True).start()
         root.after(100, self.drain)
+        root.after(STRATS_TOPMOST_REFRESH_MS, self._keep_strats_pinned)
 
     def _combo(self, parent, label, values, column):
         ttk.Label(parent, text=label, style="Muted.TLabel").grid(row=0, column=column, sticky="w", padx=(0 if column == 0 else 10, 0))
@@ -167,6 +176,20 @@ class App:
             return
         self.events.put(("restart", None))
 
+    # ---- always on top -----------------------------------------------------
+
+    def apply_pins(self):
+        self.root.attributes("-topmost", self.pin_self.get())
+        for hwnd, _ in win.find_windows(STRATS_TITLE):
+            win.set_topmost(hwnd, self.pin_strats.get())
+
+    def _keep_strats_pinned(self):
+        # Strats.gg gets a new window whenever it is restarted, so re-apply the pin.
+        if self.pin_strats.get():
+            for hwnd, _ in win.find_windows(STRATS_TITLE):
+                win.set_topmost(hwnd, True)
+        self.root.after(STRATS_TOPMOST_REFRESH_MS, self._keep_strats_pinned)
+
     # ---- display ------------------------------------------------------------
 
     def write_log(self, text):
@@ -215,6 +238,8 @@ class App:
 
     def close(self):
         self.stop.set()
+        for hwnd, _ in win.find_windows(STRATS_TITLE):
+            win.set_topmost(hwnd, False)
         self.root.destroy()
 
 

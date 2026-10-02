@@ -25,10 +25,7 @@ through a window covering them. Closing the companion releases Strats.gg.
 ## Updates
 
 The window checks GitHub for a newer release each time it opens and shows an
-"Update and restart" button when there is one. The repository is private, so
-the check uses the GitHub sign-in that Git already has on this PC (Git
-Credential Manager); on a PC without it the check fails with a message in the
-log. The old exe is kept as `StratsCompanion.old.exe` until the next start.
+"Update and restart" button when there is one. The old exe is kept as `StratsCompanion.old.exe` until the next start.
 
 ## Run from source
 

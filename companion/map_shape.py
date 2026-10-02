@@ -63,15 +63,36 @@ def _path_polygons(data):
     return polygons
 
 
+def _group_polygons(svg, group):
+    """Polygons of every path in one SVG group, rescaled to a 1024 px square."""
+    found = re.search(rf'<g id="{group}"[^>]*>(.*?)</g>', svg, re.S)
+    if not found:
+        return []
+    view = re.search(r'viewBox="([^"]+)"', svg)
+    size = float(NUMBER.findall(view.group(1))[2]) if view else VIEW_SIZE
+    polygons = []
+    for data in re.findall(r'\sd="([^"]+)"', found.group(1)):
+        polygons += [np.array(polygon) * (VIEW_SIZE / size) for polygon in _path_polygons(data)]
+    return polygons
+
+
 def silhouette(map_item, side):
     """1024x1024 uint8 mask (255 inside the walkable map) for this map and side."""
-    cache = ASSET_DIR / f"{map_item['id']}_{side}_mask.png"
+    cache = ASSET_DIR / f"{map_item['id']}_{side}_mask_v2.png"
     if cache.exists():
         return cv2.imread(str(cache), cv2.IMREAD_GRAYSCALE)
-    body = re.search(r'<g id="body">(.*?)</g>', _svg_text(map_item, side), re.S).group(1)
     mask = np.zeros((VIEW_SIZE, VIEW_SIZE), dtype=np.uint8)
-    for data in re.findall(r'\sd="([^"]+)"', body):
-        polygons = [np.round(np.array(polygon)).astype(np.int32) for polygon in _path_polygons(data) if len(polygon) >= 3]
-        cv2.fillPoly(mask, polygons, 255)
+    polygons = [np.round(polygon).astype(np.int32) for polygon in _group_polygons(_svg_text(map_item, side), "body") if len(polygon) >= 3]
+    cv2.fillPoly(mask, polygons, 255)
     cv2.imwrite(str(cache), mask)
     return mask
+
+
+def spawn(map_item, side):
+    """Where this side spawns, in map percent, taken from the spawn label on the map art."""
+    group = "callouts-attacker" if side == "attack" else "callouts-defender"
+    polygons = _group_polygons(_svg_text(map_item, side), group)
+    if not polygons:
+        return None
+    points = np.vstack(polygons)
+    return tuple((points.min(axis=0) + points.max(axis=0)) / 2 / VIEW_SIZE * 100)

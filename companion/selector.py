@@ -4,6 +4,8 @@ from . import geometry
 
 # Map coordinates are percent of the map image; 1% is roughly 1.4 m in game.
 SPIKE_RADIUS = 3.5
+# How far from the player a standing spot may be and still count as "not too far".
+MAX_WALK = 25.0
 
 # Abilities that stop or punish a defuse. Lineups using one of these win over
 # anything else that happens to land near the spike (smokes, recon, traps).
@@ -18,12 +20,14 @@ def post_plant_ability_ids(agent):
     return {ability["id"] for ability in agent["abilities"] if ability["name"] in POST_PLANT_ABILITIES}
 
 
-def choose(lineups, spike, player=None, preferred_abilities=(), radius=SPIKE_RADIUS):
-    """The lineup landing within `radius` of the spike whose standing spot is nearest the player.
+def choose(lineups, spike, player=None, preferred_abilities=(), spawn=None, radius=SPIKE_RADIUS):
+    """The best lineup landing within `radius` of the spike, or None when nothing lands there.
 
-    Lineups using a preferred ability are considered first. Without a player
-    position, the lineup landing closest to the spike wins. Returns None when
-    nothing lands on the spike.
+    Lineups using a preferred ability are considered first. Among those, the
+    one thrown from closest to the team's `spawn` wins, as long as its standing
+    spot is within MAX_WALK of the player; if none is that close, the nearest
+    standing spot wins. Without a player position, closeness to spawn decides,
+    and without a spawn either, the landing closest to the spike.
     """
     candidates = []
     for lineup in lineups:
@@ -37,9 +41,18 @@ def choose(lineups, spike, player=None, preferred_abilities=(), radius=SPIKE_RAD
     candidates = preferred or candidates
     if not candidates:
         return None
-    if player is None:
-        return min(candidates, key=lambda item: item[1])[0]
-    return min(candidates, key=lambda item: geometry.distance((item[0]["left"], item[0]["top"]), player))[0]
+
+    def standing(item):
+        return item[0]["left"], item[0]["top"]
+
+    if player is not None:
+        reachable = [item for item in candidates if geometry.distance(standing(item), player) <= MAX_WALK]
+        if not reachable or spawn is None:
+            return min(candidates, key=lambda item: geometry.distance(standing(item), player))[0]
+        candidates = reachable
+    if spawn is not None:
+        return min(candidates, key=lambda item: geometry.distance(standing(item), spawn))[0]
+    return min(candidates, key=lambda item: item[1])[0]
 
 
 def group_of(groups, lineup):

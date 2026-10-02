@@ -60,8 +60,11 @@ Positions are `left,top` in percent of the Strats.gg map image for that side.
 
 A lineup qualifies when it lands within 3.5% of the map (about 5 m) of the
 spike. Lineups using a post-plant ability (mollies, shock darts and similar,
-listed in `companion/selector.py`) win over others. Among those, the one whose
-standing spot is closest to the player is opened.
+listed in `companion/selector.py`) win over others. Among those, the one
+thrown from closest to your team's spawn is opened, as long as its standing
+spot is within 25% of the map (about 35 m in a straight line) of you. If none
+is that close, the nearest standing spot is opened instead. The 25% limit is
+`MAX_WALK` in `companion/selector.py`.
 
 ## Status
 

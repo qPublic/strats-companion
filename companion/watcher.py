@@ -74,7 +74,7 @@ class Watcher:
         if self.drive:
             driver.launch(restart=True)
         window = StratsWindow()
-        target = reader = lineups = groups = map_item = agent_item = contours = None
+        target = reader = lineups = groups = map_item = agent_item = contours = spawn = None
         last_match_check = last_thorough = 0.0
         last_spike = last_player = opened = pending = None
         waiting_reason = None
@@ -118,6 +118,7 @@ class Watcher:
                 lineups = [item for item in strats_api.lineups(map_item["id"], agent_item["id"], target[2]) if item["status"] == "approved"]
                 groups = geometry.group_lineups(lineups)
                 silhouette = map_shape.silhouette(map_item, target[2])
+                spawn = map_shape.spawn(map_item, target[2])
                 contours, _ = cv2.findContours(silhouette, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
                 reader = MinimapReader(silhouette, frame.shape[0], MinimapReader.stored_scale(frame.shape))
                 opened = pending = last_spike = None
@@ -168,7 +169,7 @@ class Watcher:
             last_spike = reading.spike
             if not steady:
                 continue
-            lineup = selector.choose(lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item))
+            lineup = selector.choose(lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item), spawn)
             if lineup is None:
                 self.on_state(lineup="none lands on the spike")
                 continue

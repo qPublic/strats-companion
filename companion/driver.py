@@ -26,6 +26,7 @@ WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 MK_LBUTTON = 0x0001
 SW_SHOWNOACTIVATE = 4
+MIN_WINDOW_WIDTH = 1000        # the Strats.gg window is a fixed 1748 px wide once restored
 
 NAV_LINEUPS = (624, 73)
 BACK_BUTTON = (81, 128)
@@ -121,13 +122,19 @@ class StratsWindow:
             raise DriverError("The Strats.gg window is not open. Open it and keep it visible (not minimised).")
         self.hwnd, rect = windows[0]
         if win.user32.IsIconic(self.hwnd):
-            # A minimised window cannot be captured or clicked; bring it back without giving it focus.
-            win.user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
-            deadline = time.time() + 5
-            while win.user32.IsIconic(self.hwnd) and time.time() < deadline:
-                time.sleep(0.2)
-            time.sleep(1.5)
-            _, rect = win.find_windows(WINDOW_TITLE)[0]
+            # A minimised window cannot be captured or clicked; bring it back without giving it
+            # focus, then wait until it is full size and has drawn its page again.
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                if win.user32.IsIconic(self.hwnd):
+                    win.user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+                time.sleep(0.5)
+                _, rect = win.find_windows(WINDOW_TITLE)[0]
+                if rect[2] - rect[0] >= MIN_WINDOW_WIDTH and self.capture().mean() > 5:
+                    time.sleep(0.5)
+                    break
+            else:
+                raise DriverError("The Strats.gg window is minimised and did not come back. Restore it by hand.")
         origin = wintypes.POINT(0, 0)
         win.user32.ClientToScreen(self.hwnd, ctypes.byref(origin))
         self.offset = (origin.x - rect[0], origin.y - rect[1])

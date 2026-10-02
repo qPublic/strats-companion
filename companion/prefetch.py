@@ -11,7 +11,7 @@ from . import map_shape, strats_api
 
 AGENTS = ("Brimstone", "Viper", "Killjoy")
 SIDES = ("attack", "defense")
-RETRY_SECONDS = 300
+RETRY_SECONDS = 30
 PAUSE_SECONDS = 1.0     # between downloads, to stay gentle on Strats.gg
 
 
@@ -34,7 +34,7 @@ def missing():
 
 
 def run(stop, on_log=print):
-    """Download whatever is missing, retrying every RETRY_SECONDS until nothing is."""
+    """Download whatever is missing, checking again every RETRY_SECONDS until nothing is, then stop."""
     names = ", ".join(AGENTS)
     downloaded, reported = 0, None
     while not stop.is_set():
@@ -54,7 +54,7 @@ def run(stop, on_log=print):
             if left != reported:
                 reported = left
                 count = "the map list" if left is None else f"{left} downloads"
-                on_log(f"Strats.gg is refusing downloads; {count} for {names} still to save. Retrying every {RETRY_SECONDS // 60} minutes.")
+                on_log(f"Strats.gg is refusing downloads; {count} for {names} still to save. Checking again every {RETRY_SECONDS} seconds.")
             stop.wait(RETRY_SECONDS)
             continue
         if downloaded:

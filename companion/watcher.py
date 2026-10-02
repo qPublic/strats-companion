@@ -9,6 +9,7 @@ from collections import deque
 
 import cv2
 import numpy as np
+import requests
 
 from . import driver, geometry, map_shape, selector, strats_api, win
 from .driver import DriverError, StratsWindow
@@ -17,6 +18,7 @@ from .riot_local import ATTACKERS_FIRST, DEFAULT_HALF_LENGTH, NotAvailable, Riot
 
 MATCH_POLL_SECONDS = 5
 THOROUGH_CALIBRATION_SECONDS = 45
+DATA_RETRY_SECONDS = 60
 STEADY_TOLERANCE = 2.0
 PREVIEW_SIZE = 360
 
@@ -136,7 +138,8 @@ class Watcher:
         sides = SideTracker()
         last_match_check = last_thorough = 0.0
         last_spike = last_player = opened = pending = None
-        waiting_reason = None
+        waiting_reason = refused = None
+        retry_at = 0.0
         self.on_log("Watching the minimap.")
         self.on_state(match="waiting for a match" if not manual else "", minimap="", spike="", player="", lineup="")
 
@@ -174,10 +177,21 @@ class Watcher:
                 if map_item is None or agent_item is None:
                     self.on_log(f"Unknown map or agent: {wanted[0]} / {wanted[1]}")
                     return
+                if wanted == refused and time.time() < retry_at:
+                    continue
+                try:
+                    found = strats_api.lineups(map_item["id"], agent_item["id"], wanted[2])
+                    silhouette = map_shape.silhouette(map_item, wanted[2])
+                except (strats_api.Unavailable, requests.RequestException) as error:
+                    if wanted != refused:
+                        self.on_log(f"No lineup data for {wanted[0]} / {wanted[1]} / {wanted[2]}: {error}")
+                        self.on_state(match=f"{wanted[0]} / {wanted[1]}: no lineup data")
+                    refused, retry_at = wanted, time.time() + DATA_RETRY_SECONDS
+                    continue
+                refused = None
                 target = wanted
-                lineups = [item for item in strats_api.lineups(map_item["id"], agent_item["id"], target[2]) if item["status"] == "approved"]
+                lineups = [item for item in found if item["status"] == "approved"]
                 groups = geometry.group_lineups(lineups)
-                silhouette = map_shape.silhouette(map_item, target[2])
                 spawn = map_shape.spawn(map_item, target[2])
                 contours, _ = cv2.findContours(silhouette, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
                 reader = MinimapReader(silhouette, frame.shape[0], MinimapReader.stored_scale(frame.shape))

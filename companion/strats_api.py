@@ -18,6 +18,10 @@ API_URL = "https://strats.gg/api/trpc"
 CACHE_TTL = 6 * 60 * 60
 
 
+class Unavailable(RuntimeError):
+    """The lineup data could not be fetched and no earlier copy is on disk."""
+
+
 def slugify(name):
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
@@ -36,7 +40,15 @@ def _cached(name, fetch):
     path = CACHE_DIR / f"{name}.json"
     if path.exists() and time.time() - path.stat().st_mtime < CACHE_TTL:
         return json.loads(path.read_text(encoding="utf-8"))
-    data = fetch()
+    try:
+        data = fetch()
+    except (requests.RequestException, ValueError) as error:
+        # Strats.gg sometimes puts a browser check in front of its API; an old copy still works.
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        reason = f"HTTP {status}" if status else type(error).__name__
+        raise Unavailable(f"Strats.gg is refusing data requests right now ({reason}) and no saved copy exists") from error
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data), encoding="utf-8")
     return data

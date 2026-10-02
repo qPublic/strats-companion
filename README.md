@@ -75,6 +75,21 @@ is that close, the nearest standing spot is opened instead. The 25% limit is
 - Not yet confirmed on a live game: a full plant-to-lineup run, and any map
   other than Ascent.
 
+## How your side is decided
+
+With Side on Auto, the Riot client's team name gives a first guess, which can
+be wrong (it was in a custom game). The screen then corrects it:
+
+- During each buy phase you can only be in your own spawn, so standing near
+  the attacker or defender spawn settles the side for that round.
+- A fixed (non-rotating) minimap is drawn with your own spawn at the bottom.
+  If it keeps matching the map art upside down, the side is flipped. No lineup
+  is picked while that check is pending. Rotating minimaps skip this rule.
+
+Once known, the side follows the round count: teams swap after 12 rounds
+(4 in Swiftplay) and every round in overtime. Picking a side by hand turns all
+of this off.
+
 ## How the minimap is read
 
 The red spike indicator that replaces the round timer says the spike is

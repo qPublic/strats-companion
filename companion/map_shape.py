@@ -88,9 +88,13 @@ def silhouette(map_item, side):
     return mask
 
 
-def spawn(map_item, side):
-    """Where this side spawns, in map percent, taken from the spawn label on the map art."""
-    group = "callouts-attacker" if side == "attack" else "callouts-defender"
+def spawn(map_item, side, of=None):
+    """Where a team spawns on this side's map art, in map percent, from its spawn label.
+
+    `of` is the team whose spawn is wanted ("attack" or "defense"); it defaults
+    to the side the art is drawn for.
+    """
+    group = "callouts-attacker" if (of or side) == "attack" else "callouts-defender"
     polygons = _group_polygons(_svg_text(map_item, side), group)
     if not polygons:
         return None

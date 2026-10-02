@@ -97,17 +97,25 @@ class RiotClient:
             "agent_id": me["CharacterID"].lower(),
             "team": me["TeamID"],
             "rounds_played": rounds_played,
+            "half_length": HALF_LENGTHS.get(queue, DEFAULT_HALF_LENGTH),
             "side": side_for(me["TeamID"], rounds_played, HALF_LENGTHS.get(queue, DEFAULT_HALF_LENGTH)),
         }
 
 
-def side_for(team, rounds_played, half_length=DEFAULT_HALF_LENGTH):
-    """Which side `team` plays in the round after `rounds_played` rounds."""
-    starts_attacking = team == ATTACKERS_FIRST
+def sides_swapped(rounds_played, half_length=DEFAULT_HALF_LENGTH):
+    """Whether teams are on the opposite side from the one they started on."""
     if rounds_played < half_length:
-        swapped = False
-    elif rounds_played < 2 * half_length:
-        swapped = True
-    else:
-        swapped = (rounds_played - 2 * half_length) % 2 == 1
-    return "attack" if starts_attacking != swapped else "defense"
+        return False
+    if rounds_played < 2 * half_length:
+        return True
+    return (rounds_played - 2 * half_length) % 2 == 1
+
+
+def side_for(team, rounds_played, half_length=DEFAULT_HALF_LENGTH):
+    """Which side `team` plays in the round after `rounds_played` rounds.
+
+    The team-name rule is only a first guess: it has been seen wrong in a
+    custom game. The watcher corrects it from what is on screen.
+    """
+    starts_attacking = team == ATTACKERS_FIRST
+    return "attack" if starts_attacking != sides_swapped(rounds_played, half_length) else "defense"

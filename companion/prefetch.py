@@ -1,4 +1,4 @@
-"""Save the lineup data for the agents played most, on every map, ahead of time.
+"""Save the lineup data for every agent on every map ahead of time.
 
 Strats.gg sometimes turns away data requests. Anything saved here keeps
 working while it does, so this runs in the background and retries until
@@ -9,7 +9,7 @@ import requests
 
 from . import map_shape, strats_api
 
-AGENTS = ("Brimstone", "Viper", "Killjoy")
+FIRST = ("Brimstone", "Viper", "Killjoy")   # saved before the other agents
 SIDES = ("attack", "defense")
 RETRY_SECONDS = 30
 PAUSE_SECONDS = 1.0     # between downloads, to stay gentle on Strats.gg
@@ -18,13 +18,16 @@ PAUSE_SECONDS = 1.0     # between downloads, to stay gentle on Strats.gg
 def missing():
     """Downloads still needed, as (description, function) pairs."""
     maps = [item for item in strats_api.maps() if item.get("showInLineups", True)]
-    agents = [item for item in (strats_api.find_by_name(strats_api.agents(), name) for name in AGENTS) if item]
+    agents = [item for item in strats_api.agents() if item.get("showInLineups", True)]
+    agents.sort(key=lambda item: item["name"] not in FIRST)
     jobs = []
     for map_item in maps:
         for side in SIDES:
             if not map_shape.svg_path(map_item, side).exists():
                 jobs.append((f"{map_item['name']} {side} map", lambda m=map_item, s=side: map_shape.silhouette(m, s)))
-            for agent in agents:
+    for agent in agents:
+        for map_item in maps:
+            for side in SIDES:
                 if not strats_api.lineups_path(map_item["id"], agent["id"], side).exists():
                     jobs.append((
                         f"{map_item['name']} / {agent['name']} / {side}",
@@ -35,7 +38,6 @@ def missing():
 
 def run(stop, on_log=print):
     """Download whatever is missing, checking again every RETRY_SECONDS until nothing is, then stop."""
-    names = ", ".join(AGENTS)
     downloaded, reported = 0, None
     while not stop.is_set():
         jobs, index = None, 0
@@ -46,7 +48,7 @@ def run(stop, on_log=print):
                     return
                 fetch()
                 if downloaded == 0:
-                    on_log(f"Saving lineup data for {names} on every map ({len(jobs)} downloads)...")
+                    on_log(f"Saving lineup data for every agent on every map, {', '.join(FIRST)} first ({len(jobs)} downloads)...")
                 downloaded += 1
                 stop.wait(PAUSE_SECONDS)
         except (strats_api.Unavailable, requests.RequestException):
@@ -54,9 +56,9 @@ def run(stop, on_log=print):
             if left != reported:
                 reported = left
                 count = "the map list" if left is None else f"{left} downloads"
-                on_log(f"Strats.gg is refusing downloads; {count} for {names} still to save. Checking again every {RETRY_SECONDS} seconds.")
+                on_log(f"Strats.gg is refusing downloads; {count} still to save. Checking again every {RETRY_SECONDS} seconds.")
             stop.wait(RETRY_SECONDS)
             continue
         if downloaded:
-            on_log(f"Lineup data for {names} is saved for every map.")
+            on_log("Lineup data for every agent is saved for every map.")
         return

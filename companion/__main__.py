@@ -142,7 +142,7 @@ def update(args):
 
 
 def download(args):
-    """Save the lineup data for Brimstone, Viper and Killjoy on every map, retrying until Strats.gg allows it."""
+    """Save the lineup data for every agent on every map, retrying until Strats.gg allows it."""
     import threading
 
     from . import prefetch

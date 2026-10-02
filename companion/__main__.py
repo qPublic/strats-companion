@@ -141,6 +141,15 @@ def update(args):
     print("Updated. Start the exe again to use the new version.")
 
 
+def download(args):
+    """Save the lineup data for Brimstone, Viper and Killjoy on every map, retrying until Strats.gg allows it."""
+    import threading
+
+    from . import prefetch
+
+    prefetch.run(threading.Event())
+
+
 def capture(args):
     """Save a screenshot of the game screen each time a hotkey is pressed (for tuning detection)."""
     import cv2
@@ -194,6 +203,9 @@ def main():
 
     update_parser = commands.add_parser("update", help=update.__doc__)
     update_parser.set_defaults(run=update)
+
+    download_parser = commands.add_parser("download", help=download.__doc__)
+    download_parser.set_defaults(run=download)
 
     capture_parser = commands.add_parser("capture", help=capture.__doc__)
     capture_parser.add_argument("--key", default="f9")

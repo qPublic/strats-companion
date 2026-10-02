@@ -64,7 +64,12 @@ def agents():
 
 def lineups(map_id, agent_id, side):
     payload = {"agentId": agent_id, "mapId": map_id, "side": side, "tag": "all", "alignment": "all"}
-    return _cached(f"lineups_{map_id}_{agent_id}_{side}", lambda: _query("valorant.lineups.all", payload))
+    return _cached(lineups_path(map_id, agent_id, side).stem, lambda: _query("valorant.lineups.all", payload))
+
+
+def lineups_path(map_id, agent_id, side):
+    """Where the saved copy of one map/agent/side's lineups lives."""
+    return CACHE_DIR / f"lineups_{map_id}_{agent_id}_{side}.json"
 
 
 def find_by_name(items, name):

@@ -19,9 +19,13 @@ NUMBER = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 ARGUMENT_COUNT = {"m": 2, "l": 2, "h": 1, "v": 1, "s": 4, "c": 6, "q": 4, "t": 2, "z": 0}
 
 
+def svg_path(map_item, side):
+    return ASSET_DIR / f"{map_item['id']}_{side}.svg"
+
+
 def _svg_text(map_item, side):
     key = map_item["attackerMapImageKey"] if side == "attack" else map_item["defenderMapImageKey"]
-    path = ASSET_DIR / f"{map_item['id']}_{side}.svg"
+    path = svg_path(map_item, side)
     if not path.exists():
         response = requests.get(f"{CDN_URL}/{key}", timeout=20)
         response.raise_for_status()

@@ -10,7 +10,7 @@ from tkinter import ttk
 
 import cv2
 
-from . import __version__, strats_api, updater, win
+from . import __version__, prefetch, strats_api, updater, win
 from .paths import CAPTURE_DIR
 from .driver import WINDOW_TITLE as STRATS_TITLE
 from .watcher import PREVIEW_SIZE, Watcher
@@ -97,6 +97,10 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.close)
         updater.remove_previous()
         threading.Thread(target=self._check_update, daemon=True).start()
+        self.closing = threading.Event()
+        threading.Thread(
+            target=prefetch.run, args=(self.closing, lambda text: self.events.put(("log", text))), daemon=True
+        ).start()
         root.after(100, self.drain)
         root.after(STRATS_TOPMOST_REFRESH_MS, self._keep_strats_pinned)
 
@@ -238,6 +242,7 @@ class App:
 
     def close(self):
         self.stop.set()
+        self.closing.set()
         for hwnd, _ in win.find_windows(STRATS_TITLE):
             win.set_topmost(hwnd, False)
         self.root.destroy()

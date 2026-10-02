@@ -10,7 +10,7 @@ from tkinter import ttk
 
 import cv2
 
-from . import strats_api, win
+from . import __version__, strats_api, updater, win
 from .paths import CAPTURE_DIR
 from .watcher import PREVIEW_SIZE, Watcher
 
@@ -30,7 +30,8 @@ class App:
         self.stop = threading.Event()
         self.worker = self.watcher = self.photo = None
 
-        root.title("Strats Companion")
+        root.title(f"Strats Companion {__version__}")
+        self.update = None
         root.configure(bg=BACKGROUND)
         root.resizable(False, False)
         style = ttk.Style()
@@ -73,6 +74,9 @@ class App:
         buttons.grid(row=len(STATE_ROWS), column=0, columnspan=2, sticky="w", pady=(12, 0))
         ttk.Button(buttons, text="Recalibrate minimap", command=self.recalibrate).grid(row=0, column=0)
         ttk.Button(buttons, text="Save screenshot", command=self.save_screenshot).grid(row=0, column=1, padx=(8, 0))
+        self.update_button = ttk.Button(status, text="", style="Accent.TButton", command=self.install_update)
+        self.update_button.grid(row=len(STATE_ROWS) + 1, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        self.update_button.grid_remove()
 
         self.preview = tk.Label(root, bg=PANEL, width=PREVIEW_SIZE, height=PREVIEW_SIZE, bd=0)
         self.blank = tk.PhotoImage(width=PREVIEW_SIZE, height=PREVIEW_SIZE)
@@ -83,6 +87,8 @@ class App:
         self.log.grid(row=2, column=0, columnspan=2, padx=14, pady=(6, 14))
 
         root.protocol("WM_DELETE_WINDOW", self.close)
+        updater.remove_previous()
+        threading.Thread(target=self._check_update, daemon=True).start()
         root.after(100, self.drain)
 
     def _combo(self, parent, label, values, column):
@@ -136,6 +142,31 @@ class App:
         cv2.imwrite(str(path), win.capture_screen())
         self.write_log(f"Saved {path}")
 
+    # ---- updates ------------------------------------------------------------
+
+    def _check_update(self):
+        try:
+            self.events.put(("update", updater.check()))
+        except updater.UpdateError as error:
+            self.events.put(("log", f"Update check failed: {error}"))
+
+    def install_update(self):
+        if not updater.can_install():
+            self.write_log("Running from source: update with git pull instead.")
+            return
+        self.stop.set()
+        self.update_button.configure(state="disabled", text="Downloading 0%")
+        threading.Thread(target=self._download_update, daemon=True).start()
+
+    def _download_update(self):
+        try:
+            updater.install(self.update, lambda fraction: self.events.put(("progress", fraction)))
+        except updater.UpdateError as error:
+            self.events.put(("log", str(error)))
+            self.events.put(("progress", None))
+            return
+        self.events.put(("restart", None))
+
     # ---- display ------------------------------------------------------------
 
     def write_log(self, text):
@@ -156,6 +187,21 @@ class App:
                         self.state[key].set(value)
                 elif kind == "preview":
                     latest_preview = payload
+                elif kind == "update":
+                    self.update = payload
+                    if payload is None:
+                        self.write_log(f"Version {__version__} is up to date.")
+                    else:
+                        self.write_log(f"Version {payload['version']} is available.")
+                        self.update_button.configure(text=f"Update to {payload['version']} and restart")
+                        self.update_button.grid()
+                elif kind == "progress":
+                    if payload is None:
+                        self.update_button.configure(state="normal", text=f"Update to {self.update['version']} and restart")
+                    else:
+                        self.update_button.configure(text=f"Downloading {payload:.0%}")
+                elif kind == "restart":
+                    updater.restart()
                 elif kind == "stopped":
                     self.toggle.configure(text="Start", state="normal")
                     self.write_log("Stopped.")

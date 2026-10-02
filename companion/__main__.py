@@ -5,7 +5,7 @@ import sys
 import time
 from datetime import datetime
 
-from . import driver, geometry, selector, strats_api
+from . import __version__, driver, geometry, selector, strats_api
 from .driver import DriverError, StratsWindow
 from .paths import CAPTURE_DIR
 
@@ -122,6 +122,22 @@ def ui(args):
     window.main()
 
 
+def update(args):
+    """Install the newest release of the exe if there is one."""
+    from . import updater
+
+    try:
+        found = updater.check()
+        if found is None:
+            print(f"Version {__version__} is up to date.")
+            return
+        print(f"Updating {__version__} -> {found['version']}...")
+        updater.install(found)
+    except updater.UpdateError as error:
+        sys.exit(str(error))
+    print("Updated. Start the exe again to use the new version.")
+
+
 def capture(args):
     """Save a screenshot of the game screen each time a hotkey is pressed (for tuning detection)."""
     import cv2
@@ -143,6 +159,7 @@ def capture(args):
 
 def main():
     parser = argparse.ArgumentParser(prog="companion")
+    parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
 
     launch_parser = commands.add_parser("launch", help=launch.__doc__)
@@ -171,6 +188,9 @@ def main():
 
     ui_parser = commands.add_parser("ui", help=ui.__doc__)
     ui_parser.set_defaults(run=ui)
+
+    update_parser = commands.add_parser("update", help=update.__doc__)
+    update_parser.set_defaults(run=update)
 
     capture_parser = commands.add_parser("capture", help=capture.__doc__)
     capture_parser.add_argument("--key", default="f9")

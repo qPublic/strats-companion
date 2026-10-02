@@ -14,6 +14,14 @@ shows what it detects, a minimap preview with the matched outline, and a log. An
 `%LOCALAPPDATA%\StratsCompanion`. The exe is unsigned, so Windows SmartScreen
 will warn on first run.
 
+## Updates
+
+The window checks GitHub for a newer release each time it opens and shows an
+"Update and restart" button when there is one. The repository is private, so
+the check uses the GitHub sign-in that Git already has on this PC (Git
+Credential Manager); on a PC without it the check fails with a message in the
+log. The old exe is kept as `StratsCompanion.old.exe` until the next start.
+
 ## Run from source
 
 ```
@@ -35,6 +43,7 @@ From source, run `.venv\Scripts\python -m companion <command>` in this folder.
 | `show --map ascent --agent viper --side attack --spike 20.8,27.4 --player 29.6,40.3` | Opens the best lineup for a spike and player position given by hand. Without `--spike` it only shows the lineup map. |
 | `run [--map ascent --agent viper] [--side attack] [--dry-run] [--video file]` | Watches the minimap about once a second and opens the best post-plant lineup when the spike is planted. Map, agent and side come from the match unless given. `--video` analyses a recording instead of the screen; `--dry-run` only prints the choice. |
 | `follow [--side attack]` | Keeps Strats.gg on the map, agent and side of the match in progress. |
+| `update` | Installs the newest release of the exe, if there is one. |
 | `capture [--key f9]` | Saves a screenshot of the primary monitor on each key press, for tuning minimap detection. |
 
 Positions are `left,top` in percent of the Strats.gg map image for that side.

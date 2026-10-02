@@ -78,17 +78,17 @@ is that close, the nearest standing spot is opened instead. The 25% limit is
 ## How your side is decided
 
 With Side on Auto, the Riot client's team name gives a first guess, which can
-be wrong (it was in a custom game). The screen then corrects it:
-
-- During each buy phase you can only be in your own spawn, so standing near
-  the attacker or defender spawn settles the side for that round.
-- A fixed (non-rotating) minimap is drawn with your own spawn at the bottom.
-  If it keeps matching the map art upside down, the side is flipped. No lineup
-  is picked while that check is pending. Rotating minimaps skip this rule.
+be wrong (it was in a custom game). A fixed (non-rotating) minimap then
+corrects it: it is drawn with your own spawn at the bottom, so if it keeps
+matching the map art upside down, the side is flipped. No lineup is picked
+while that check is pending.
 
 Once known, the side follows the round count: teams swap after 12 rounds
-(4 in Swiftplay) and every round in overtime. Picking a side by hand turns all
-of this off.
+(4 in Swiftplay) and every round in overtime.
+
+With a rotating minimap, or with Fixed Orientation set to "Always the Same",
+the minimap cannot show the side; pick Side by hand in the window if the first
+guess is wrong. Picking a side by hand turns the automatic logic off.
 
 ## How the minimap is read
 

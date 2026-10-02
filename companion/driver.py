@@ -7,7 +7,6 @@ checked against a capture of the window before the next one is taken.
 """
 
 import ctypes
-import itertools
 import os
 import subprocess
 import time
@@ -26,6 +25,7 @@ WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 MK_LBUTTON = 0x0001
+SW_SHOWNOACTIVATE = 4
 
 NAV_LINEUPS = (624, 73)
 BACK_BUTTON = (81, 128)
@@ -45,9 +45,10 @@ TEMPLATE_THRESHOLD = 0.8
 DEFAULT_MAP_RECT = (377.6, 106.9, 851.7)
 MARKER_RADIUS = 14
 COLOR_TOLERANCE = 60
-MIN_BLOB_AREA = 40
-FIT_TOLERANCE = 6
-MIN_FIT_FRACTION = 0.5
+MIN_MARKER_PIXELS = 15
+# On the right page these measure about 1.0 and 0.9; on a wrong one at most 0.45 and 0.2.
+MIN_COVERED = 0.75
+MIN_EXPLAINED = 0.6
 
 MAP_DIALOG, AGENT_DIALOG, LINEUP_PAGE, MAP_VIEW, OTHER = "map-dialog", "agent-dialog", "lineup", "map-view", "other"
 
@@ -120,7 +121,13 @@ class StratsWindow:
             raise DriverError("The Strats.gg window is not open. Open it and keep it visible (not minimised).")
         self.hwnd, rect = windows[0]
         if win.user32.IsIconic(self.hwnd):
-            raise DriverError("The Strats.gg window is minimised. Restore it, ideally on a second monitor.")
+            # A minimised window cannot be captured or clicked; bring it back without giving it focus.
+            win.user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+            deadline = time.time() + 5
+            while win.user32.IsIconic(self.hwnd) and time.time() < deadline:
+                time.sleep(0.2)
+            time.sleep(1.5)
+            _, rect = win.find_windows(WINDOW_TITLE)[0]
         origin = wintypes.POINT(0, 0)
         win.user32.ClientToScreen(self.hwnd, ctypes.byref(origin))
         self.offset = (origin.x - rect[0], origin.y - rect[1])
@@ -181,55 +188,29 @@ class StratsWindow:
                 return self.state()
         return previous
 
-    # ---- marker fitting -----------------------------------------------------
+    # ---- page check --------------------------------------------------------
 
-    def _marker_blobs(self, image, color):
-        target = np.array([int(color[i:i + 2], 16) for i in (5, 3, 1)], dtype=np.int16)
-        mask = (np.abs(image.astype(np.int16) - target).max(axis=2) < COLOR_TOLERANCE).astype(np.uint8)
-        mask[:, :330] = 0
-        count, _, stats, centers = cv2.connectedComponentsWithStats(mask)
-        return np.array([centers[i] for i in range(1, count) if stats[i][cv2.CC_STAT_AREA] > MIN_BLOB_AREA])
+    def shows(self, image, groups, color):
+        """Whether the lineup map on screen is the one these marker groups belong to.
 
-    @staticmethod
-    def _inliers(points, blobs, scale, origin):
-        projected = points * scale + origin
-        nearest = np.linalg.norm(projected[:, None, :] - blobs[None, :, :], axis=2).min(axis=1)
-        return int((nearest < FIT_TOLERANCE).sum())
-
-    def fit_map(self, image, groups, color):
-        """Locate the map square by matching known marker positions to the markers on screen.
-
-        Returns the fraction of groups found; updates self.map_rect on success.
+        Two tests, both on pixels in the agent's marker colour: nearly every
+        expected marker has colour around it, and nearly all of that colour sits
+        on an expected marker. A different map, agent or side fails at least one.
         """
         if not groups:
-            return 0.0
-        blobs = self._marker_blobs(image, color)
-        if len(blobs) < 2:
-            return 0.0
-        points = np.array([group["point"] for group in groups], dtype=float)
-        left, top, size = self.map_rect
-        best = (self._inliers(points, blobs, size / 100, np.array([left, top])), size / 100, np.array([left, top]))
-        if best[0] < MIN_FIT_FRACTION * len(points):
-            base = DEFAULT_MAP_RECT[2] / 100
-            for i, j in itertools.combinations(range(len(points)), 2):
-                span = np.linalg.norm(points[i] - points[j])
-                if span < 15:
-                    continue
-                for k, m in itertools.permutations(range(len(blobs)), 2):
-                    scale = np.linalg.norm(blobs[k] - blobs[m]) / span
-                    if not 0.75 * base < scale < 3.1 * base:
-                        continue
-                    origin = blobs[k] - points[i] * scale
-                    score = self._inliers(points, blobs, scale, origin)
-                    if score > best[0]:
-                        best = (score, scale, origin)
-                if best[0] >= 0.8 * len(points):
-                    break
-        score, scale, origin = best
-        fraction = score / len(points)
-        if fraction >= MIN_FIT_FRACTION:
-            self.map_rect = (float(origin[0]), float(origin[1]), float(scale * 100))
-        return fraction
+            return False
+        target = np.array([int(color[i:i + 2], 16) for i in (5, 3, 1)], dtype=np.int16)
+        mask = np.abs(image.astype(np.int16) - target).max(axis=2) < COLOR_TOLERANCE
+        mask[:, :330] = False
+        ys, xs = np.nonzero(mask)
+        if len(xs) < MIN_MARKER_PIXELS:
+            return False
+        pixels = np.stack([xs, ys], axis=1).astype(np.float32)
+        points = np.array([self.to_window(group["point"]) for group in groups], dtype=np.float32)
+        distances = np.linalg.norm(points[:, None, :] - pixels[None, :, :], axis=2)
+        covered = ((distances < MARKER_RADIUS + 2).sum(axis=1) >= MIN_MARKER_PIXELS).mean()
+        explained = (distances.min(axis=0) < MARKER_RADIUS + 6).mean()
+        return covered >= MIN_COVERED and explained >= MIN_EXPLAINED
 
     def to_window(self, point):
         left, top, size = self.map_rect
@@ -251,6 +232,7 @@ class StratsWindow:
         agent_index = next(i for i, item in enumerate(listed_agents) if item["id"] == agent_item["id"])
         wanted = (map_item["id"], agent_item["id"])
         map_done = agent_done = self.shown == wanted
+        retries = 0
 
         for _ in range(12):
             image = self.capture()
@@ -274,7 +256,7 @@ class StratsWindow:
                     self.click(*SIDE_BUTTONS[side])
                     time.sleep(1.2)
                     continue
-                if self.fit_map(image, groups, agent_item["color"]) >= MIN_FIT_FRACTION:
+                if self.shows(image, groups, agent_item["color"]):
                     self.shown = wanted
                     return
                 if not map_done:
@@ -282,16 +264,23 @@ class StratsWindow:
                 elif not agent_done:
                     self.click(*CHANGE_AGENT)
                 else:
+                    # Map and agent were both just picked; give the markers a moment to load.
                     time.sleep(1.0)
-                    if self.fit_map(self.capture(), groups, agent_item["color"]) >= MIN_FIT_FRACTION:
+                    if not groups or self.shows(self.capture(), groups, agent_item["color"]):
                         self.shown = wanted
                         return
+                    retries += 1
+                    if retries > 1:
+                        break
                     map_done = agent_done = False
                     self.shown = None
                     continue
             self._wait_for_change(state)
         self.shown = None
-        raise DriverError("Could not get Strats.gg to the requested lineup map.")
+        raise DriverError(
+            "Could not get Strats.gg to the requested lineup map. Check that its map is not zoomed or dragged "
+            "and that the lineup filters are on All."
+        )
 
     def _click_point_for(self, groups, group):
         """A point inside this group's marker that no later-drawn marker covers."""

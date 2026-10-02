@@ -201,6 +201,12 @@ class Watcher:
                 description = f"{map_item['name']} / {agent_item['name']} / {target[2]}"
                 self.on_log(f"Match: {description} ({len(lineups)} lineups)")
                 self.on_state(match=description, lineup="")
+                if self.drive:
+                    # Set Strats.gg up now, so only the lineup click is left when the spike goes down.
+                    try:
+                        window.show_map(maps, agents, map_item, agent_item, target[2], groups)
+                    except DriverError as error:
+                        self.on_log(f"Strats.gg: {error}")
 
             if self.recalibrate:
                 self.recalibrate = False

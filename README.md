@@ -121,17 +121,24 @@ the map, so the next lineup is a single click away.
 ## How your side is decided
 
 With Side on Auto, the Riot client's team name gives a first guess, which can
-be wrong (it was in a custom game). A fixed (non-rotating) minimap then
-corrects it: it is drawn with your own spawn at the bottom, so if it keeps
-matching the map art upside down, the side is flipped. No lineup is picked
-while that check is pending.
+be wrong (it was in a custom game). Then:
+
+- **Respawns.** At the start of a round you are put in your team's spawn. A
+  jump of more than 25 m between two reads can only be that respawn, and if
+  you then stay at a spawn for 3 reads, your side is the side of that spawn.
+  Where you stand later in the round is never used.
+- **Team changes.** If the Riot client reports that your team changed during
+  the match (custom games can swap teams), the side swaps with it.
+- **Minimap orientation.** A fixed minimap set to follow your side is drawn
+  with your own spawn at the bottom; if it keeps matching the map art upside
+  down, the side is flipped. The first respawn shows whether your minimap
+  follows your side or is always drawn the same way, and that is remembered;
+  a minimap that is always the same way is not used for this. No lineup is
+  picked while this check is pending.
 
 Once known, the side follows the round count: teams swap after 12 rounds
-(4 in Swiftplay) and every round in overtime.
-
-With a rotating minimap, or with Fixed Orientation set to "Always the Same",
-the minimap cannot show the side; pick Side by hand in the window if the first
-guess is wrong. Picking a side by hand turns the automatic logic off.
+(4 in Swiftplay) and every round in overtime. Picking a side by hand in the
+window turns the automatic logic off.
 
 ## How the minimap is read
 

@@ -4,6 +4,7 @@ Shared by the console `run` command and the window in ui.py. Progress is
 reported through three callbacks so each front end can show it its own way.
 """
 
+import json
 import time
 from collections import deque
 
@@ -14,6 +15,7 @@ import requests
 from . import app_cache, driver, geometry, map_shape, selector, strats_api, win
 from .driver import DriverError, StratsWindow
 from .minimap import MinimapReader
+from .paths import CALIBRATION_FILE
 from .riot_local import ATTACKERS_FIRST, DEFAULT_HALF_LENGTH, NotAvailable, RiotClient, sides_swapped
 
 MATCH_POLL_SECONDS = 5
@@ -29,21 +31,55 @@ PREVIEW_SIZE = 360
 
 ORIENTATION_READS = 6          # consecutive upside-down minimap reads before the side is flipped
 ORIENTATION_TOLERANCE = 3.0
+TELEPORT_METRES = 25           # further than anyone moves between two reads: only a round-start respawn does it
+TELEPORT_SECONDS = 3
+SPAWN_METRES = 20              # how close to a team's spawn label a respawn has to land
+SPAWN_READS = 3                # reads in a row at that spawn afterwards (the buy phase keeps you there)
+FOLLOWS_SIDE_KEY = "minimap_follows_side"
+
+
+def _minimap_follows_side():
+    """Whether this player's fixed minimap turns with their side, as learnt in an earlier match (None if unknown)."""
+    try:
+        return json.loads(CALIBRATION_FILE.read_text()).get(FOLLOWS_SIDE_KEY)
+    except (OSError, ValueError):
+        return None
+
+
+def _remember_minimap_follows_side(follows):
+    try:
+        stored = json.loads(CALIBRATION_FILE.read_text()) if CALIBRATION_FILE.exists() else {}
+        stored[FOLLOWS_SIDE_KEY] = follows
+        CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CALIBRATION_FILE.write_text(json.dumps(stored, indent=1))
+    except (OSError, ValueError):
+        pass
 
 
 class SideTracker:
-    """Which side the player is on, corrected from the screen and carried across the half-time swap."""
+    """Which side the player is on, corrected from the screen and carried across side swaps."""
 
     def __init__(self):
         self.starts_attacking = None
+        self.team = None
         self.rounds = 0
         self.half_length = DEFAULT_HALF_LENGTH
         self.angles = deque(maxlen=ORIENTATION_READS)
         self.rotating = False
+        # A fixed minimap is either drawn from your side ("Based on Side") or always the same way
+        # round; only the first says anything about the side. Learnt from a respawn.
+        self.follows_side = _minimap_follows_side()
+        self.last_position = None
+        self.spawn_candidate = None
 
     def update_match(self, team, rounds, half_length):
         if self.starts_attacking is None:
             self.starts_attacking = team == ATTACKERS_FIRST
+        elif self.team is not None and team != self.team:
+            # The teams were swapped (custom games allow it at any time): the side swaps with them.
+            self.starts_attacking = not self.starts_attacking
+            self.angles.clear()
+        self.team = team
         self.half_length = half_length
         if rounds != self.rounds:
             self.rounds = rounds
@@ -56,20 +92,21 @@ class SideTracker:
     def set_side(self, side):
         self.starts_attacking = (side == "attack") != sides_swapped(self.rounds, self.half_length)
         self.angles.clear()
+        # Positions are about to be read on the other side's map art.
+        self.last_position = self.spawn_candidate = None
 
     def observe(self, reading, assumed):
         """The side the minimap says the player is on, when that differs from `assumed`; else None.
 
-        A fixed minimap is drawn with your own spawn at the bottom, like the map
-        art for your side; if it keeps matching upside down, the art is for the
-        wrong side. A rotating minimap says nothing about the side, and shows
-        itself by sitting at odd angles. Where the player stands is not used:
-        once a round is under way anyone can be anywhere.
+        A fixed minimap set to follow your side is drawn with your own spawn at
+        the bottom, like the map art for your side; if it keeps matching upside
+        down, the art is for the wrong side. A minimap that is always drawn the
+        same way, or a rotating one, says nothing about the side.
         """
         angle = reading.registration.angle
         if abs((angle + 45) % 90 - 45) > ORIENTATION_TOLERANCE:
             self.rotating = True
-        if self.rotating:
+        if self.rotating or self.follows_side is False:
             self.angles.clear()
             return None
         self.angles.append(angle)
@@ -79,9 +116,53 @@ class SideTracker:
 
     def upside_down(self):
         """Whether every recent read of a fixed minimap matched the map art turned half way round."""
-        return bool(self.angles) and all(
+        return self.follows_side is not False and bool(self.angles) and all(
             abs((angle - 180 + 180) % 360 - 180) <= ORIENTATION_TOLERANCE for angle in self.angles
         )
+
+    def observe_spawn(self, reading, now, map_item, assumed):
+        """The side whose spawn the player has just been respawned in at a round start, else None.
+
+        Only the jump into a spawn counts, never where the player stands later
+        in the round: a move of TELEPORT_METRES between two reads can only be the
+        respawn, and the buy phase then keeps the player at that spawn.
+        """
+        player = reading.player
+        if player is None:
+            return None
+        previous, self.last_position = self.last_position, (player, now)
+        spawns = {side: map_shape.spawn(map_item, assumed, of=side) for side in ("attack", "defense")}
+        if self.spawn_candidate is not None:
+            side, count = self.spawn_candidate
+            if spawns[side] is None or geometry.metres(map_item, player, spawns[side]) > SPAWN_METRES:
+                self.spawn_candidate = None
+            elif count + 1 >= SPAWN_READS:
+                self.spawn_candidate = None
+                self._learn_minimap(reading, side, assumed)
+                return side
+            else:
+                self.spawn_candidate = (side, count + 1)
+                return None
+        if previous is None or now - previous[1] > TELEPORT_SECONDS:
+            return None
+        if geometry.metres(map_item, previous[0], player) < TELEPORT_METRES:
+            return None
+        nearest = min((side for side in spawns if spawns[side] is not None),
+                      key=lambda side: geometry.metres(map_item, player, spawns[side]), default=None)
+        if nearest is not None and geometry.metres(map_item, player, spawns[nearest]) <= SPAWN_METRES:
+            self.spawn_candidate = (nearest, 1)
+        return None
+
+    def _learn_minimap(self, reading, side, assumed):
+        """Compare a known side with the minimap's orientation to see whether the minimap follows the side."""
+        if self.rotating:
+            return
+        upside_down = abs((reading.registration.angle - 180 + 180) % 360 - 180) <= ORIENTATION_TOLERANCE
+        follows = upside_down == (side != assumed)
+        if follows != self.follows_side:
+            self.follows_side = follows
+            _remember_minimap_follows_side(follows)
+        self.angles.clear()
 
 
 THREAT_SECONDS = 10     # an enemy or a teammate's death this old says nothing about where enemies are now
@@ -318,6 +399,12 @@ class Watcher:
                 self.on_state(minimap="not visible", spike="planted" if reading.planted else "not planted")
                 continue
             if self.side is None:
+                respawned = sides.observe_spawn(reading, now, map_item, target[2])
+                if respawned is not None and respawned != target[2]:
+                    sides.set_side(respawned)
+                    last_player = last_spike = None
+                    self.on_log(f"Side corrected to {respawned}: you respawned in the {respawned} spawn.")
+                    continue
                 correction = sides.observe(reading, target[2])
                 if correction is not None:
                     sides.set_side(correction)

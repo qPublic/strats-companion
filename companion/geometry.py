@@ -39,3 +39,16 @@ def group_lineups(lineups):
 
 def distance(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def metres(map_item, a, b):
+    """In-game distance between two map points.
+
+    Strats.gg's map art has the same framing as Riot's minimap image, so Riot's
+    xMultiplier (image fraction per game unit, a game unit being 1 cm) applies.
+    """
+    return distance(a, b) / 100 / abs(map_item["xMultiplier"]) / 100
+
+
+def standing_spot(lineup):
+    return lineup["left"], lineup["top"]

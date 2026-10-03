@@ -63,6 +63,11 @@ spot is within 25% of the map (about 35 m in a straight line) of you. If none
 is that close, the nearest standing spot is opened instead. The 25% limit is
 `MAX_WALK` in `companion/selector.py`.
 
+The pick can change while you move. Once you are within 25 m of the opened
+lineup's standing spot it is locked in for the rest of the round and nothing
+else is opened until the spike is gone (`LOCK_METRES` in
+`companion/watcher.py`).
+
 ## Status
 
 - Working and tested: lineup data, lineup choice, driving the Strats.gg window.

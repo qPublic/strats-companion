@@ -20,6 +20,7 @@ MATCH_POLL_SECONDS = 5
 THOROUGH_CALIBRATION_SECONDS = 45
 DATA_RETRY_SECONDS = 60
 STEADY_TOLERANCE = 2.0
+LOCK_METRES = 25        # once this close to the chosen lineup's standing spot, keep it for the round
 PREVIEW_SIZE = 360
 
 
@@ -138,6 +139,7 @@ class Watcher:
         sides = SideTracker()
         last_match_check = last_thorough = 0.0
         last_spike = last_player = opened = pending = None
+        locked = False
         waiting_reason = refused = None
         retry_at = 0.0
         self.on_log("Watching the minimap.")
@@ -196,6 +198,7 @@ class Watcher:
                 contours, _ = cv2.findContours(silhouette, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
                 reader = MinimapReader(silhouette, frame.shape[0], MinimapReader.stored_scale(frame.shape))
                 opened = pending = last_spike = None
+                locked = False
                 description = f"{map_item['name']} / {agent_item['name']} / {target[2]}"
                 self.on_log(f"Match: {description} ({len(lineups)} lineups)")
                 self.on_state(match=description, lineup="")
@@ -249,8 +252,17 @@ class Watcher:
                 last_spike = None
                 if opened is not None:
                     opened = pending = None
+                    locked = False
                     self.on_log("Spike no longer planted.")
                     self.on_state(lineup="")
+                continue
+            if opened is not None and not locked and last_player is not None:
+                away = geometry.metres(map_item, last_player, geometry.standing_spot(opened))
+                if away <= LOCK_METRES:
+                    locked = True
+                    self.on_log(f"Locked in {opened['title']}: you are {away:.0f} m from where it is thrown.")
+                    self.on_state(lineup=f"{opened['title']} (locked)")
+            if locked:
                 continue
             if reading.spike is None:
                 continue
@@ -263,12 +275,12 @@ class Watcher:
             if lineup is None:
                 self.on_state(lineup="none lands on the spike")
                 continue
-            if lineup["id"] == opened:
+            if opened is not None and lineup["id"] == opened["id"]:
                 continue
             if lineup["id"] != pending:
                 pending = lineup["id"]
                 continue
-            opened = lineup["id"]
+            opened = lineup
             where = f"spike {reading.spike[0]:.0f},{reading.spike[1]:.0f}"
             if last_player is not None:
                 where += f" / you {last_player[0]:.0f},{last_player[1]:.0f}"

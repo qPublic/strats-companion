@@ -176,6 +176,10 @@ In test mode, "Next lineup" opens the next lineup for the same plant, ignoring
 the lock, to try several standing spots in a row; after the last one it starts
 again from the first.
 
+"Next lineup hotkey" does the same from inside the game (F8 unless changed).
+Untick it to turn it off; "Change" waits for the next key or key combination
+you press and uses that. The key still reaches the game.
+
 ## How your side is decided
 
 With Side on Auto, the Riot client's team name gives a first guess, which can

@@ -11,6 +11,7 @@ from tkinter import font as tkfont
 from tkinter import ttk
 
 import cv2
+import keyboard
 
 from . import __version__, broken, prefetch, strats_api, updater, win
 from .paths import CAPTURE_DIR, DATA_DIR
@@ -32,6 +33,7 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 SCALE_LIMITS = (0.85, 2.5)            # how far text and controls shrink or grow with the window
 SCALED_FONTS = ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkHeadingFont")
 WRAP_LENGTH = 250
+DEFAULT_HOTKEY = "f8"
 STATE_ROWS = (("match", "Match"), ("minimap", "Minimap"), ("spike", "Spike"), ("player", "You"), ("lineup", "Lineup"))
 
 
@@ -112,6 +114,17 @@ class App:
         self.next_button.grid(row=1, column=1, padx=(8, 0), pady=(8, 0), sticky="ew")
         self.clear_button = ttk.Button(buttons, text="", command=self.clear_broken)
         self.clear_button.grid(row=1, column=2, padx=(8, 0), pady=(8, 0), sticky="ew")
+        # A key for Next lineup that works while the game has focus; it can be changed and turned off.
+        hotkey_row = ttk.Frame(buttons)
+        hotkey_row.grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.hotkey_on = tk.BooleanVar(value=True)
+        self.hotkey = tk.StringVar(value=DEFAULT_HOTKEY)
+        self.hotkey_handle = None
+        ttk.Checkbutton(hotkey_row, text="Next lineup hotkey:", variable=self.hotkey_on,
+                        command=self._register_hotkey).grid(row=0, column=0)
+        ttk.Label(hotkey_row, textvariable=self.hotkey, width=12).grid(row=0, column=1, padx=(6, 0))
+        self.hotkey_button = ttk.Button(hotkey_row, text="Change", command=self.change_hotkey)
+        self.hotkey_button.grid(row=0, column=2, padx=(6, 0))
         self._refresh_lineup_buttons()
         self.update_button = ttk.Button(status, text="", style="Accent.TButton", command=self.install_update)
         self.update_button.grid(row=len(STATE_ROWS) + 1, column=0, columnspan=2, sticky="w", pady=(12, 0))
@@ -139,6 +152,7 @@ class App:
         self.resume_after_update = False
         settings = self._load_settings()
         self._refresh_lineup_buttons()
+        self._register_hotkey()
         root.geometry(settings.get("geometry") or f"{self.base_size[0]}x{self.base_size[1]}")
         root.bind("<Configure>", self._on_resize)
 
@@ -162,7 +176,7 @@ class App:
             "map": self.map_choice, "agent": self.agent_choice, "side": self.side_choice,
             "drive": self.drive, "pin_self": self.pin_self, "pin_strats": self.pin_strats,
             "fullscreen": self.fullscreen, "hide_strats": self.hide_strats, "show_guide": self.show_guide,
-            "test_mode": self.test_mode,
+            "test_mode": self.test_mode, "hotkey": self.hotkey, "hotkey_on": self.hotkey_on,
         }
 
     def _load_settings(self):
@@ -276,7 +290,38 @@ class App:
             self.root.after(1500, self._refresh_lineup_buttons)
 
     def next_lineup(self):
+        if not self.test_mode.get():
+            self.write_log("Next lineup works in test mode only.")
+            return
         self._send("next")
+
+    # ---- hotkey ---------------------------------------------------------------
+
+    def _register_hotkey(self):
+        if self.hotkey_handle is not None:
+            try:
+                keyboard.remove_hotkey(self.hotkey_handle)
+            except (KeyError, ValueError):
+                pass
+            self.hotkey_handle = None
+        if not self.hotkey_on.get():
+            return
+        try:
+            # The key still reaches the game; the press is handed to the window's thread.
+            self.hotkey_handle = keyboard.add_hotkey(self.hotkey.get(), lambda: self.events.put(("next", None)))
+        except (ValueError, ImportError) as error:
+            self.write_log(f"Could not use {self.hotkey.get()} as a hotkey: {error}")
+
+    def change_hotkey(self):
+        self.hotkey_button.configure(text="Press keys...", state="disabled")
+        if self.hotkey_handle is not None:
+            keyboard.remove_hotkey(self.hotkey_handle)
+            self.hotkey_handle = None
+
+        def listen():
+            self.events.put(("hotkey", keyboard.read_hotkey(suppress=False)))
+
+        threading.Thread(target=listen, daemon=True).start()
 
     def clear_broken(self):
         self.write_log(f"Cleared {broken.clear()} broken lineup marks.")
@@ -396,6 +441,14 @@ class App:
                         self.update_button.configure(state="normal", text=f"Install {self.update['version']} now")
                     else:
                         self.update_button.configure(text=f"Downloading {payload:.0%}")
+                elif kind == "next":
+                    self.next_lineup()
+                elif kind == "hotkey":
+                    self.hotkey.set(payload)
+                    self.hotkey_button.configure(text="Change", state="normal")
+                    self.hotkey_on.set(True)
+                    self._register_hotkey()
+                    self.write_log(f"Next lineup hotkey set to {payload}.")
                 elif kind == "restart":
                     # Relaunch on the new version with the same settings, still watching if it was.
                     self._save_settings(resume=self.resume_after_update)
@@ -422,6 +475,7 @@ class App:
 
     def close(self):
         self._save_settings()
+        keyboard.unhook_all_hotkeys()
         self.stop.set()
         self.closing.set()
         for hwnd, _ in win.find_windows(STRATS_TITLE):

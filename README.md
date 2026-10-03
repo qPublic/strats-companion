@@ -133,8 +133,11 @@ the map, so the next lineup is a single click away.
 
 ## In-game guide
 
-With "Show in-game guide" ticked, the chosen lineup is drawn over the game
-(Valorant must run in Windowed Fullscreen):
+This is off by default: it draws over the game, which is the part of the
+companion most likely to conflict with Riot's rules. Without it the companion
+only opens the lineup in Strats.gg. With "Show in-game guide" ticked, the
+chosen lineup is drawn over the game (Valorant must run in Windowed
+Fullscreen):
 
 - **Where to stand**, on the minimap: a ring on the standing spot, a dashed
   line to where it lands, and the distance, which turns to "In position"

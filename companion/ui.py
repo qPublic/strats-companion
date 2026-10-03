@@ -88,7 +88,8 @@ class App:
         self.hide_strats = tk.BooleanVar(value=True)
         ttk.Checkbutton(pins, text="Full-screen the lineup video", variable=self.fullscreen, command=self.apply_options).grid(row=0, column=2, padx=(18, 0))
         ttk.Checkbutton(pins, text="Minimise Strats.gg between lineups", variable=self.hide_strats, command=self.apply_options).grid(row=0, column=3, padx=(18, 0))
-        self.show_guide = tk.BooleanVar(value=True)
+        # Off unless asked for: it draws over the game, the part of this most open to objection.
+        self.show_guide = tk.BooleanVar(value=False)
         self.test_mode = tk.BooleanVar(value=False)
         ttk.Checkbutton(pins, text="Test mode: a dropped spike counts as planted", variable=self.test_mode, command=self.apply_options).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
         ttk.Checkbutton(pins, text="Show in-game guide", variable=self.show_guide, command=self.apply_options).grid(row=0, column=4, padx=(18, 0))
@@ -177,10 +178,12 @@ class App:
     # ---- settings and size ----------------------------------------------------
 
     def _settings_vars(self):
+        # The guide is saved as "in_game_guide" (once "show_guide"), so a setting saved while it was
+        # on by default does not turn it back on.
         return {
             "map": self.map_choice, "agent": self.agent_choice, "side": self.side_choice,
             "drive": self.drive, "pin_self": self.pin_self, "pin_strats": self.pin_strats,
-            "fullscreen": self.fullscreen, "hide_strats": self.hide_strats, "show_guide": self.show_guide,
+            "fullscreen": self.fullscreen, "hide_strats": self.hide_strats, "in_game_guide": self.show_guide,
             "test_mode": self.test_mode, "hotkey": self.hotkey, "hotkey_on": self.hotkey_on,
         }
 

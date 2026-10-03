@@ -150,8 +150,11 @@ def _store_aim(lineup_id, picture):
     from .aim import AimGuide
 
     AIM_DIR.mkdir(parents=True, exist_ok=True)
+    from . import spot
+
     guide = AimGuide.from_picture(picture)
     guide.save(AIM_DIR / f"{lineup_id}.npz")
+    spot.save_minimap(lineup_id, picture)
     preview = cv2.resize(picture, (PREVIEW_WIDTH, int(PREVIEW_WIDTH * picture.shape[0] / picture.shape[1])),
                          interpolation=cv2.INTER_AREA)
     cv2.imwrite(str(AIM_DIR / f"{lineup_id}.jpg"), preview, [cv2.IMWRITE_JPEG_QUALITY, 85])

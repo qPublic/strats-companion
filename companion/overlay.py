@@ -51,7 +51,7 @@ class Overlay:
         self.photo = None
         self.visible = False
         self.static_key = self.aim_mode = self.aim_key = None
-        self.ground_mode = None
+        self.ground_mode = self.panel_key = None
 
     def _text(self, x, y, text, color=TEXT, size=16, anchor="center", tag="static"):
         font = ("Segoe UI", size, "bold")
@@ -67,7 +67,7 @@ class Overlay:
         if guide is None:
             self.canvas.delete("all")
             self.static_key = self.aim_mode = self.aim_key = None
-            self.ground_mode = None
+            self.ground_mode = self.panel_key = None
             if self.visible:
                 self.window.withdraw()
                 self.visible = False
@@ -76,6 +76,7 @@ class Overlay:
         self._draw_static(guide, scale)
         self._draw_ground(guide.get("ground"), scale)
         self._draw_aim(guide, scale)
+        self._draw_panel(guide)
         if not self.visible:
             self.window.deiconify()
             self.window.attributes("-topmost", True)
@@ -171,12 +172,6 @@ class Overlay:
                 self.canvas.delete("aim")
                 self._arrow(aim, scale)
                 self.aim_mode, self.aim_key = "arrow", key
-        elif guide.get("in_position") and guide.get("picture") is not None:
-            # The scenery could not be matched: show the aim screenshot, as the Strats.gg overlay does.
-            if self.aim_mode != "panel" or self.aim_key != guide.get("title"):
-                self.canvas.delete("aim")
-                self._panel(guide["picture"], guide.get("title", ""))
-                self.aim_mode, self.aim_key = "panel", guide.get("title")
         elif self.aim_mode is not None:
             self.canvas.delete("aim")
             self.aim_mode = self.aim_key = None
@@ -204,16 +199,31 @@ class Overlay:
         self._text(tail[0] - ux * 60 * scale, tail[1] - uy * 60 * scale, "Turn " + ", ".join(turn), AIM,
                    int(20 * scale), tag="aim")
 
-    def _panel(self, picture, title):
+    def _draw_panel(self, guide):
+        """The lineup's aim screenshot, shown the whole time the lineup is open, to check the reticle against."""
+        picture = guide.get("picture")
+        key = None if picture is None else guide.get("title")
+        if key == self.panel_key:
+            return
+        self.canvas.delete("panel")
+        self.panel_key = key
+        if picture is None:
+            return
         width, height = self.size
         panel_width = int(width * PANEL_WIDTH_FRACTION)
         panel_height = int(panel_width * picture.shape[0] / picture.shape[1])
         resized = cv2.resize(picture, (panel_width, panel_height), interpolation=cv2.INTER_AREA)
+        # The screenshot's crosshair is its middle: mark it so the aim point is easy to see.
+        centre = (panel_width // 2, panel_height // 2)
+        arm = max(8, panel_width // 40)
+        for colour, thickness in (((0, 0, 0), 5), ((142, 252, 61), 2)):
+            cv2.line(resized, (centre[0] - arm, centre[1]), (centre[0] + arm, centre[1]), colour, thickness)
+            cv2.line(resized, (centre[0], centre[1] - arm), (centre[0], centre[1] + arm), colour, thickness)
         self.photo = tk.PhotoImage(data=base64.b64encode(cv2.imencode(".png", resized)[1].tobytes()))
         x, y = width - panel_width - 30, (height - panel_height) // 2
-        self.canvas.create_image(x, y, image=self.photo, anchor="nw", tags="aim")
-        self.canvas.create_rectangle(x, y, x + panel_width, y + panel_height, outline=AIM, width=2, tags="aim")
-        self._text(x, y - 18, title or "Aim like this", TEXT, 13, anchor="w", tag="aim")
+        self.canvas.create_image(x, y, image=self.photo, anchor="nw", tags="panel")
+        self.canvas.create_rectangle(x, y, x + panel_width, y + panel_height, outline=AIM, width=2, tags="panel")
+        self._text(x, y - 18, guide.get("title") or "Aim like this", TEXT, 13, anchor="w", tag="panel")
 
     def close(self):
         self.window.destroy()

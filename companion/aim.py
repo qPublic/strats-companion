@@ -26,6 +26,8 @@ import numpy as np
 HORIZONTAL_FOV = 103.0
 WORK_WIDTH = 960                # both pictures are matched at this width
 FEATURES = 1500
+FAST_THRESHOLD = 7              # low, so faint patterns on plain walls and in the sky give features too
+EDGE_THRESHOLD = 15
 RATIO = 0.75                    # Lowe's ratio test for a distinctive match
 MIN_INLIERS = 15
 RANSAC_ROUNDS = 256
@@ -75,6 +77,10 @@ def _mask(width, height, origin=(0, 0), size=None):
 _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 
+def _orb(features):
+    return cv2.ORB_create(features, fastThreshold=FAST_THRESHOLD, edgeThreshold=EDGE_THRESHOLD)
+
+
 def _gray(image, scale):
     small = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     # Even out lighting so the same wall matches under different exposure.
@@ -112,7 +118,7 @@ class AimGuide:
     """
 
     def __init__(self, points, descriptors, size):
-        self.orb = cv2.ORB_create(FEATURES)
+        self.orb = _orb(FEATURES)
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
         self.points = np.asarray(points, np.float64).reshape(-1, 2)
         self.descriptors = None if descriptors is None or len(descriptors) == 0 else np.asarray(descriptors, np.uint8)
@@ -132,7 +138,7 @@ class AimGuide:
     @classmethod
     def from_picture(cls, reference):
         gray = _gray(reference, WORK_WIDTH / reference.shape[1])
-        keypoints, descriptors = cv2.ORB_create(FEATURES).detectAndCompute(gray, _mask(gray.shape[1], gray.shape[0]))
+        keypoints, descriptors = _orb(FEATURES).detectAndCompute(gray, _mask(gray.shape[1], gray.shape[0]))
         points = np.float32([keypoint.pt for keypoint in keypoints]).reshape(-1, 2)
         return cls(points, descriptors, (gray.shape[1], gray.shape[0]))
 
@@ -203,7 +209,7 @@ class AimGuide:
 # ---- following the aim point between full matches ---------------------------
 
 FOLLOW_PERIOD = 1 / 90          # the reticle follows the scenery this often
-MATCH_PERIOD = 1 / 12           # full matches, which correct any drift, this often
+MATCH_PERIOD = 1 / 8            # full matches, which correct any drift, this often
 PATCH = 72                      # side of the patch of scenery around the aim point that is followed (screen pixels)
 SEARCH = 150                    # how far that patch may move between two follows
 MIN_FOLLOW_SCORE = 0.6

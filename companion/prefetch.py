@@ -9,7 +9,7 @@ import json
 
 import requests
 
-from . import app_cache, map_shape, selector, strats_api
+from . import app_cache, map_shape, selector, spot, strats_api
 
 FIRST = ("Brimstone", "Viper", "Killjoy")   # saved before the other agents
 SIDES = ("attack", "defense")
@@ -52,6 +52,23 @@ def missing():
                         jobs.append((
                             f"aim for {lineup['title']}",
                             lambda lineup_id=lineup["id"]: strats_api.aim_data(lineup_id, strict=True),
+                        ))
+    # Last, the true standing spots, read from the minimap in each stored aim screenshot.
+    for agent in agents:
+        mollies = selector.post_plant_ability_ids(agent)
+        if not mollies:
+            continue
+        for map_item in maps:
+            for side in SIDES:
+                path = strats_api.lineups_path(map_item["id"], agent["id"], side)
+                if not path.exists():
+                    continue
+                for lineup in json.loads(path.read_text(encoding="utf-8")):
+                    if lineup["status"] == "approved" and lineup["abilityId"] in mollies \
+                            and spot.minimap_path(lineup["id"]).exists() and not spot.known(lineup["id"]):
+                        jobs.append((
+                            f"spot for {lineup['title']}",
+                            lambda item={**lineup, "side": side}, m=map_item: spot.true_spot(item, m),
                         ))
     return jobs
 

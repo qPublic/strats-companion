@@ -79,7 +79,9 @@ loads them, and reads them from there.
 
 ## How a lineup is chosen
 
-A lineup qualifies when it lands within 4.5 m of the spike and uses the
+A lineup qualifies when it lands within 4.5 m of the spike; those landing
+within 1 m of the closest landing come first, so with two plant spots close
+together the other spot's lineups are not picked and uses the
 agent's molly (or a similar thrown ability that damages a defuser, such as
 Sova's shock darts or Killjoy's Nanoswarm, listed in `companion/selector.py`).
 Smokes, recon, traps and ultimates are never picked for an agent that has a
@@ -145,6 +147,14 @@ With "Show in-game guide" ticked, the chosen lineup is drawn over the game
   the pointer on it, looking up or down from how vertical edges lean, and
   every small turn in between from how the picture shifts (about 30 times a
   second). The floor is taken to be level with your feet.
+- **The aim picture**: the lineup's aim screenshot, with its aim point marked,
+  stays on the right of the screen the whole time the lineup is open, to check
+  the reticle against.
+- **The standing spot itself** is read from the minimap in the lineup's aim
+  screenshot, where the author's icon shows exactly where they stood. Strats.gg's
+  own dots are placed by hand and can be a metre or two out. Reading a
+  screenshot takes about a second (a minute the first time an author's minimap
+  zoom is seen); until then, and when it cannot be read, Strats.gg's dot is used.
 - **Where to aim**, once in position: the lineup's aim screenshot is matched
   against the screen. Standing on the spot, the two views differ only by how
   the camera is turned (the field of view is fixed), so the match gives that

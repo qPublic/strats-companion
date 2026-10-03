@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 import requests
 
-from . import app_cache, broken, driver, geometry, map_shape, selector, strats_api, win
+from . import app_cache, broken, driver, geometry, map_shape, selector, spot, strats_api, win
 from .aim import AimGuide, Tracker
 from .ground import GroundTracker
 from .driver import DriverError, StratsWindow
@@ -280,6 +280,7 @@ class Watcher:
         self.last_aim = None
         self.tracker = None
         self.ground = None          # GroundTracker while walking to the standing spot
+        self.true_spots = {}        # lineup id -> standing spot read from its aim screenshot (or None)
         self.last_ground = None
         self.reader = None
         self.stop_event = None
@@ -334,10 +335,28 @@ class Watcher:
                     loaded += 1
         return loaded
 
+    def _standing_spot(self, lineup, map_item):
+        """The lineup's standing spot: as read from its aim screenshot once that is done, else Strats.gg's dot."""
+        if lineup["id"] not in self.true_spots:
+            self.true_spots[lineup["id"]] = None
+
+            def read():
+                try:
+                    found = spot.true_spot(lineup, map_item)
+                except Exception:  # noqa: BLE001 - the dot still works
+                    found = None
+                self.true_spots[lineup["id"]] = found
+                if found is not None:
+                    moved = geometry.metres(map_item, found, geometry.standing_spot(lineup))
+                    self.on_log(f"Standing spot for {lineup['title']} taken from its screenshot "
+                                f"({moved:.1f} m from the Strats.gg dot).")
+            threading.Thread(target=read, daemon=True).start()
+        return self.true_spots[lineup["id"]] or geometry.standing_spot(lineup)
+
     def _show_guide(self, frame, reading, lineup, map_item, player):
         """Tell the overlay where the standing spot is on the minimap and, once there, where to aim."""
         registration = reading.registration
-        spot = geometry.standing_spot(lineup)
+        spot = self._standing_spot(lineup, map_item)
         guide = {"title": lineup["title"], "metres": None, "in_position": False}
         if registration is not None:
             guide["stand"] = tuple(float(v) for v in registration.to_screen(spot))
@@ -355,11 +374,14 @@ class Watcher:
             self.ground.lineup_id = lineup["id"]
             self.ground.registration = registration
             self.ground.start()
-        elif registration is not None:
-            self.ground.registration = registration
-        matcher = None
-        if guide["in_position"]:
-            matcher, guide["picture"] = self._aim_guide(lineup)
+        else:
+            if registration is not None:
+                self.ground.registration = registration
+            self.ground.spot = spot
+        # The aim picture shows the whole time the lineup is open; the reticle only once on the spot.
+        matcher, guide["picture"] = self._aim_guide(lineup)
+        if not guide["in_position"]:
+            matcher = None
         if matcher is None:
             self._stop_tracker()
         elif self.video is not None:
@@ -701,7 +723,8 @@ class Watcher:
                 note = "none lands on the spike" if nearest is None else f"none lands on the spike (nearest {nearest:.0f} m away)"
                 if note != no_lineup_note:
                     no_lineup_note = note
-                    self.on_log(f"No lineup for this plant: {note[5:]}.")
+                    self.on_log("No lineup lands on this plant" + ("." if nearest is None else
+                                f"; the nearest lands {nearest:.0f} m away."))
                 self.on_state(lineup=note)
                 continue
             no_lineup_note = None

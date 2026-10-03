@@ -12,6 +12,8 @@ MAX_WALK = 35.0
 DANGER_RADIUS = 14.0
 # After a lineup has been used this many times for the same plant, others get a turn.
 REPEAT_LIMIT = 2
+# Lineups landing more than this much further from the spike than the closest one are for another plant.
+LANDING_SLACK = 1.0
 
 # Mollies and other thrown abilities that damage a defuser. For an agent with one
 # of these, only these are used: never a smoke, recon or trap, and not ultimates.
@@ -48,6 +50,8 @@ def ranked(map_item, lineups, spike, player=None, preferred_abilities=(), threat
     them count; an agent without any can use whatever lands there. Lineups whose
     id is in `exclude` (marked broken, or skipped while testing) are left out.
     In order of importance:
+    - Lineups landing within LANDING_SLACK of the closest landing come first:
+      with two plant spots close together, the other spot's lineups come later.
     - `used` counts how often each lineup was used for this plant before; ones
       used fewer than REPEAT_LIMIT times come first, then the least used.
     - Standing spots more than DANGER_RADIUS from every threat (a spotted enemy
@@ -70,8 +74,14 @@ def ranked(map_item, lineups, spike, player=None, preferred_abilities=(), threat
     safe_distance = geometry.map_distance(map_item, DANGER_RADIUS)
     reach = geometry.map_distance(map_item, MAX_WALK)
 
+    # Plants close together: a lineup made for the other one also lands within SPIKE_RADIUS. Those
+    # landing clearly further from this spike than the best one come after all the close ones.
+    misses = {lineup["id"]: geometry.metres(map_item, geometry.landing_point(lineup), spike) for lineup in candidates}
+    closest = min(misses.values(), default=0.0)
+
     def order(lineup):
         spot = geometry.standing_spot(lineup)
+        other_plant = misses[lineup["id"]] > closest + LANDING_SLACK
         uses = used.get(lineup["id"], 0)
         # Stay unpredictable: a lineup used REPEAT_LIMIT times for this plant gives way to the others.
         use_rank = 0 if uses < REPEAT_LIMIT else uses
@@ -83,7 +93,7 @@ def ranked(map_item, lineups, spike, player=None, preferred_abilities=(), threat
             place_rank = (0 if near_player else 1, from_spike)
         else:
             place_rank = (2, from_spike if player is None else geometry.distance(spot, player))
-        return use_rank, danger_rank, place_rank
+        return other_plant, use_rank, danger_rank, place_rank
 
     return sorted(candidates, key=order)
 

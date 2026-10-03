@@ -89,6 +89,10 @@ lineup's standing spot it is locked in for the rest of the round, threats
 included, and nothing else is opened until the spike is gone (`LOCK_METRES`
 in `companion/watcher.py`).
 
+When the spike is defused or explodes (its indicator gone for 3 reads in a
+row) or the next round starts, the lineup is closed and Strats.gg goes back to
+the map, so the next lineup is a single click away.
+
 ## Status
 
 - Working and tested: lineup data, lineup choice, driving the Strats.gg window.

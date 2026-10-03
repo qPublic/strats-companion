@@ -22,6 +22,7 @@ DATA_RETRY_SECONDS = 60
 APP_LOAD_WAIT = 2.0         # seconds between looks at the app's cache after opening a map in it
 APP_LOAD_ATTEMPTS = 4
 STEADY_TOLERANCE = 2.0
+SPIKE_GONE_READS = 3     # reads in a row without the planted indicator before the lineup is closed
 LOCK_METRES = 25        # once this close to the chosen lineup's standing spot, keep it for the round
 PREVIEW_SIZE = 360
 
@@ -199,6 +200,7 @@ class Watcher:
         last_match_check = last_thorough = 0.0
         last_spike = last_player = opened = pending = None
         locked = False
+        opened_round = unplanted = 0
         waiting_reason = refused = None
         retry_at = 0.0
         self.on_log("Watching the minimap.")
@@ -291,6 +293,22 @@ class Watcher:
             reading = reader.read(frame)
             if self.on_preview is not None:
                 self._preview(reader, frame, reading, contours)
+            # Leave the lineup once the spike is defused or explodes, or the next round starts, so
+            # Strats.gg is back on the map and the next lineup is a single click away.
+            if opened is not None:
+                unplanted = 0 if reading.planted else unplanted + 1
+                over = ("a new round started" if sides.rounds != opened_round
+                        else "the spike is gone" if unplanted >= SPIKE_GONE_READS else None)
+                if over:
+                    opened = pending = last_spike = None
+                    locked = False
+                    self.on_log(f"Closing the lineup: {over}.")
+                    self.on_state(lineup="")
+                    if self.drive:
+                        try:
+                            window.show_map(maps, agents, map_item, agent_item, target[2], groups)
+                        except DriverError as error:
+                            self.on_log(f"Strats.gg: {error}")
             if reading.registration is None:
                 self.on_state(minimap="not visible", spike="planted" if reading.planted else "not planted")
                 continue
@@ -321,11 +339,6 @@ class Watcher:
             )
             if not reading.planted:
                 last_spike = None
-                if opened is not None:
-                    opened = pending = None
-                    locked = False
-                    self.on_log("Spike no longer planted.")
-                    self.on_state(lineup="")
                 continue
             if opened is not None and not locked and last_player is not None:
                 away = geometry.metres(map_item, last_player, geometry.standing_spot(opened))
@@ -353,7 +366,7 @@ class Watcher:
             if lineup["id"] != pending:
                 pending = lineup["id"]
                 continue
-            opened = lineup
+            opened, opened_round, unplanted = lineup, sides.rounds, 0
             where = f"spike {reading.spike[0]:.0f},{reading.spike[1]:.0f}"
             if last_player is not None:
                 where += f" / you {last_player[0]:.0f},{last_player[1]:.0f}"

@@ -51,7 +51,8 @@ TELEPORT_SECONDS = 3           # without the round count, a jump only counts bet
 RESPAWN_WINDOW_SECONDS = 60    # after the round count goes up, look this long for the respawn, however far apart the reads
 SPAWN_METRES = 20              # how close to a team's spawn label a respawn has to land
 SPAWN_READS = 3                # reads at that spawn, the jump included (the buy phase keeps you there)
-FOLLOWS_SIDE_KEY = "minimap_follows_side"
+# (An earlier key, "minimap_follows_side", could be learnt wrongly on attack rounds and is no longer read.)
+FOLLOWS_SIDE_KEY = "minimap_turns_with_side"
 
 
 def _minimap_follows_side():
@@ -122,7 +123,9 @@ class SideTracker:
         A fixed minimap set to follow your side is drawn with your own spawn at
         the bottom, like the map art for your side; if it keeps matching upside
         down, the art is for the wrong side. A minimap that is always drawn the
-        same way, or a rotating one, says nothing about the side.
+        same way, or a rotating one, says nothing about the side. Until a defence
+        respawn has shown which kind a fixed one is, it is taken to follow the
+        side, which is the game's default.
         """
         angle = reading.registration.angle
         if abs((angle + 45) % 90 - 45) > ORIENTATION_TOLERANCE:
@@ -190,8 +193,13 @@ class SideTracker:
         return None
 
     def _learn_minimap(self, reading, side, assumed):
-        """Compare a known side with the minimap's orientation to see whether the minimap follows the side."""
-        if self.rotating:
+        """Compare a known side with the minimap's orientation to see whether the minimap follows the side.
+
+        Only a defence respawn tells the two kinds apart: on attack both are
+        drawn with the attackers' spawn at the bottom.
+        """
+        self.angles.clear()
+        if self.rotating or side != "defense":
             return
         upside_down = abs((reading.registration.angle - 180 + 180) % 360 - 180) <= ORIENTATION_TOLERANCE
         follows = upside_down == (side != assumed)
@@ -286,6 +294,7 @@ class Watcher:
         self.tracker = None
         self.true_spots = {}        # lineup id -> standing spot read from its aim screenshot (or None)
         self.wrong_pictures = broken.picture_ids()
+        self.spot_reads = set()     # lineups whose screenshot is being read for the spot right now
         self.reader = None
         self.stop_event = None
         self.hurry = False
@@ -345,6 +354,7 @@ class Watcher:
         """The lineup's standing spot: as read from its aim screenshot once that is done, else Strats.gg's dot."""
         if lineup["id"] not in self.true_spots:
             self.true_spots[lineup["id"]] = None
+            self.spot_reads.add(lineup["id"])
 
             def read():
                 found = None
@@ -358,6 +368,7 @@ class Watcher:
                         break
                     self.stop_event.wait(SPOT_RETRY_SECONDS)
                 self.true_spots[lineup["id"]] = found
+                self.spot_reads.discard(lineup["id"])
                 if found is not None:
                     moved = geometry.metres(map_item, found, geometry.standing_spot(lineup))
                     self.on_log(f"Standing spot for {lineup['title']} taken from its screenshot "
@@ -431,7 +442,8 @@ class Watcher:
                 known = self.aim_guides.get(opened["id"])
                 if known is not None and known[0] is None:
                     self.aim_guides.pop(opened["id"])          # try the aim picture again on the next read
-                if self.true_spots.get(opened["id"], 0) is None and not spot.known(opened["id"]):
+                if (self.true_spots.get(opened["id"], 0) is None and opened["id"] not in self.spot_reads
+                        and not spot.known(opened["id"])):
                     self.true_spots.pop(opened["id"])          # and the standing spot from its screenshot
         if self.drive:
             self._drive(lambda: self._check_strats(window, maps, agents, map_item, agent_item, side, groups, opened))
@@ -796,9 +808,9 @@ class Watcher:
             if used:
                 usual = selector.choose(
                     map_item, lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item),
-                    threats.active(now),
+                    threats.active(now), exclude=broken.ids() | skipped,
                 )
-                if usual is not None and usual["id"] != lineup["id"]:
+                if usual is not None and usual["id"] != lineup["id"] and used[usual["id"]] >= selector.REPEAT_LIMIT:
                     self.on_log(f"Not using {usual['title']} again: used {used[usual['id']]} times for this plant.")
             where = f"spike {reading.spike[0]:.0f},{reading.spike[1]:.0f}"
             if last_player is not None:

@@ -28,6 +28,7 @@ SNAP_DEGREES = 1.0             # a fit this close to a right angle is a fixed mi
 SNAP_SCORE_SLACK = 0.002       # ...when the exact right angle fits about as well
 TRACK_ANGLE_RANGE = 9
 CALIBRATION_SCALES = np.arange(0.22, 0.90, 0.02)   # screen pixels per map view unit
+CALIBRATION_FINALISTS = 4       # coarse candidates whose zoom is then searched in small steps
 DEFAULT_SCALE = 0.405          # zoom seen with default minimap settings at both 1080p and 1440p
 LINE_THRESHOLD = 18
 ICON_RADIUS = 27.5             # player icon radius in map view units
@@ -44,11 +45,22 @@ MAX_DEATH_FILL = 0.8          # an X covers part of its box; a solid blob covers
 X_STROKE = 0.22               # how far (as a fraction of its box) a pixel may be from an X's diagonal
 MIN_ON_STROKES = 0.75
 MIN_EACH_STROKE = 0.25
-SPIKE_AREA = (0.0001, 0.0015)  # blob area as a fraction of the on-screen map square
+SPIKE_AREA = (0.0001, 0.0025)  # blob area as a fraction of the on-screen map square
+SPIKE_MAX_ASPECT = 1.6         # real icons measure 1.0-1.15 (width against height)...
+SPIKE_MIN_SIDE = 0.7           # ...1.2-1.7 icon radii on their shorter side (0.7-1.1 in compressed video)...
+SPIKE_MIN_FILL = 0.5           # ...and fill 0.64-0.77 of their box
 # Spike indicator that replaces the round timer once the spike is planted,
 # as (left, top, right, bottom) fractions of the frame.
-PLANTED_REGION = (0.47, 0.01, 0.53, 0.085)
-MIN_PLANTED_RED = 0.15
+# The planted-spike icon at the top of the screen, in units of the screen height. Measured on
+# 60 planted frames (1080p and 1440p): 0.062-0.078 wide, 0.057-0.074 tall, centred within 0.005,
+# its middle 0.047-0.053 down. The red timer of a round's last seconds is 0.10 wide and 0.04 tall.
+PLANTED_REGION = (0.47, 0.01, 0.53, 0.085)     # where the icon is, as fractions of the screen
+MIN_PLANTED_RED = 0.15             # red share of that region that keeps a planted spike planted
+PLANTED_SEARCH = (0.11, 0.105)     # half-width and height of the part of the HUD looked at
+PLANTED_WIDTH = (0.055, 0.088)
+PLANTED_HEIGHT = (0.050, 0.082)
+PLANTED_OFF_CENTRE = 0.015
+PLANTED_TOP = (0.040, 0.060)
 
 
 @dataclass
@@ -177,12 +189,35 @@ def _x_shaped(blob):
     return on_stroke.mean() >= MIN_ON_STROKES and falling.mean() >= MIN_EACH_STROKE and rising.mean() >= MIN_EACH_STROKE
 
 
-def spike_planted(frame):
+def spike_planted(frame, was_planted=False):
+    """Whether the planted-spike icon has replaced the round timer at the top of the screen.
+
+    The icon is a red mark of one size and shape in the middle of the HUD. Red alone is not
+    enough to say the spike has gone down: the timer itself turns red in a round's last ten
+    seconds, and a red wall or roof shows through the HUD. Once it is down (`was_planted`),
+    red there is enough to say it still is: looking at a red roof joins the icon to the red
+    behind it, and its shape is lost.
+    """
     height, width = frame.shape[:2]
-    left, top, right, bottom = PLANTED_REGION
-    region = cv2.cvtColor(frame[int(top * height):int(bottom * height), int(left * width):int(right * width)], cv2.COLOR_BGR2HSV)
+    if was_planted:
+        left, top, right, bottom = PLANTED_REGION
+        region = cv2.cvtColor(frame[int(top * height):int(bottom * height), int(left * width):int(right * width)], cv2.COLOR_BGR2HSV)
+        # The icon pulses, fading to a dark red at the bottom of each pulse: darker red counts here.
+        red = cv2.inRange(region, (0, 110, 50), (8, 255, 255)) | cv2.inRange(region, (170, 110, 50), (180, 255, 255))
+        if float((red > 0).mean()) >= MIN_PLANTED_RED:
+            return True
+    half = int(PLANTED_SEARCH[0] * height)
+    left = width // 2 - half
+    region = cv2.cvtColor(frame[:int(PLANTED_SEARCH[1] * height), left:width // 2 + half], cv2.COLOR_BGR2HSV)
     red = cv2.inRange(region, (0, 140, 90), (8, 255, 255)) | cv2.inRange(region, (170, 140, 90), (180, 255, 255))
-    return float((red > 0).mean()) >= MIN_PLANTED_RED
+    red = cv2.morphologyEx(red, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    count, _, stats, _ = cv2.connectedComponentsWithStats(red)
+    if count < 2:
+        return False
+    x, y, wide, tall, _ = stats[1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))]
+    centre_x, centre_y = (left + x + wide / 2 - width / 2) / height, (y + tall / 2) / height
+    return bool(PLANTED_WIDTH[0] <= wide / height <= PLANTED_WIDTH[1] and PLANTED_HEIGHT[0] <= tall / height <= PLANTED_HEIGHT[1]
+                and abs(centre_x) <= PLANTED_OFF_CENTRE and PLANTED_TOP[0] <= centre_y <= PLANTED_TOP[1])
 
 
 def _line_map(image):
@@ -217,6 +252,7 @@ class MinimapReader:
         self.frame_height = frame_height
         self.scale = scale
         self.last = None
+        self.planted = False        # as of the last read
         self._templates = {}
 
     # ---- calibration --------------------------------------------------------
@@ -235,23 +271,30 @@ class MinimapReader:
         takes a minute or two.
         """
         lines = _Lines(self._roi(frame))
-        best = self._locate(lines, DEFAULT_SCALE)
+
+        def finest(candidates):
+            """The best of the leading candidates once each has had its zoom searched in small steps.
+
+            The score peaks sharply at the true zoom (a hundredth off halves it), so on the coarse
+            grid a chance fit at another zoom can outscore the true one's neighbour.
+            """
+            best = max(candidates, key=lambda candidate: candidate.score)
+            for start in sorted(candidates, key=lambda candidate: -candidate.score)[:CALIBRATION_FINALISTS]:
+                for scale in np.arange(start.scale - 0.015, start.scale + 0.0151, 0.005):
+                    candidate = self._refine(lines, float(scale), start.angle, start.center)
+                    if candidate.score > best.score:
+                        best = candidate
+            return best
+
+        best = finest([self._locate(lines, DEFAULT_SCALE)])
         if best.score < MIN_CALIBRATION_SCORE:
+            candidates = [best]
             for scale in CALIBRATION_SCALES:
                 upright = self._search(lines, float(scale), (0, 90, 180, 270), 0.25)
-                candidate = self._refine(lines, float(scale), upright.angle, upright.center)
-                if candidate.score > best.score:
-                    best = candidate
+                candidates.append(self._refine(lines, float(scale), upright.angle, upright.center))
+            best = finest(candidates)
         if best.score < MIN_CALIBRATION_SCORE and thorough:
-            for scale in CALIBRATION_SCALES:
-                candidate = self._locate(lines, float(scale))
-                if candidate.score > best.score:
-                    best = candidate
-        # The score peaks sharply at the true zoom, so finish with small steps around the best.
-        for scale in np.arange(best.scale - 0.015, best.scale + 0.0151, 0.005):
-            candidate = self._refine(lines, float(scale), best.angle, best.center)
-            if candidate.score > best.score:
-                best = candidate
+            best = finest([best] + [self._locate(lines, float(scale)) for scale in CALIBRATION_SCALES])
         if best.score >= MIN_CALIBRATION_SCORE:
             self.scale = round(best.scale, 3)
             self.last = None
@@ -344,6 +387,14 @@ class MinimapReader:
         best = self._refine(lines, scale, upright.angle, upright.center)
         if best.score >= MIN_CALIBRATION_SCORE:
             return best
+        # At quarter size the outline's thin lines can lose to a busy background (stonework, foliage)
+        # somewhere else in the corner; at half size they hold up, and four angles cost little.
+        upright = self._search(lines, scale, (0, 90, 180, 270), 0.5)
+        candidate = self._refine(lines, scale, upright.angle, upright.center)
+        if candidate.score > best.score:
+            best = candidate
+        if best.score >= MIN_CALIBRATION_SCORE:
+            return best
         placements = [self._search(lines, scale, (angle,), 0.25) for angle in range(0, 360, COARSE_ANGLE_STEP)]
         for coarse in sorted(placements, key=lambda item: item.score, reverse=True)[:3]:
             candidate = self._refine(lines, scale, coarse.angle, coarse.center)
@@ -371,15 +422,22 @@ class MinimapReader:
 
     def _find_spike(self, roi, registration):
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.dilate(cv2.inRange(hsv, (20, 150, 170), (34, 255, 255)), np.ones((3, 3), np.uint8))
+        # Grown enough to join the pieces a pulsing icon breaks into at low resolution.
+        mask = cv2.dilate(cv2.inRange(hsv, (20, 150, 170), (34, 255, 255)), np.ones((5, 5), np.uint8))
         count, _, stats, centers = cv2.connectedComponentsWithStats(mask)
         map_area = (VIEW_SIZE * registration.scale) ** 2
+        radius = ICON_RADIUS * registration.scale
         best = None
         for index in range(1, count):
             area, width, height = stats[index][cv2.CC_STAT_AREA], stats[index][cv2.CC_STAT_WIDTH], stats[index][cv2.CC_STAT_HEIGHT]
             if not SPIKE_AREA[0] * map_area <= area <= SPIKE_AREA[1] * map_area:
                 continue
-            if max(width, height) > 2.5 * min(width, height) or not self._on_map(registration, centers[index], self.inside):
+            if not self._on_map(registration, centers[index], self.inside):
+                continue
+            # The icon is a solid, roughly square mark about an icon across. The yellow rings some
+            # abilities draw (Killjoy's Lockdown), cut into arcs by walls and icons, are thin slivers.
+            if (max(width, height) > SPIKE_MAX_ASPECT * min(width, height) or min(width, height) < SPIKE_MIN_SIDE * radius
+                    or area < SPIKE_MIN_FILL * width * height):
                 continue
             if best is None or area > best[0]:
                 best = (area, centers[index])
@@ -491,7 +549,8 @@ class MinimapReader:
         return None if spike is None else registration.to_map(spike)
 
     def read(self, frame):
-        reading = Reading(planted=spike_planted(frame))
+        reading = Reading(planted=spike_planted(frame, self.planted))
+        self.planted = reading.planted
         reading.registration = self.register(frame)
         if reading.registration is None:
             return reading

@@ -6,7 +6,7 @@ reported through three callbacks so each front end can show it its own way.
 
 import json
 import time
-from collections import deque
+from collections import Counter, deque
 
 import cv2
 import numpy as np
@@ -25,6 +25,7 @@ APP_LOAD_WAIT = 2.0         # seconds between looks at the app's cache after ope
 APP_LOAD_ATTEMPTS = 4
 STEADY_TOLERANCE = 2.0
 SPIKE_GONE_READS = 3     # reads in a row without the planted indicator before the lineup is closed
+SAME_PLANT_METRES = 3    # spikes this close together count as the same plant
 LOCK_METRES = 25        # once this close to the chosen lineup's standing spot, keep it for the round
 PREVIEW_SIZE = 360
 
@@ -314,6 +315,8 @@ class Watcher:
         last_spike = last_player = opened = pending = None
         locked = False
         opened_round = unplanted = 0
+        opened_spike = None
+        used_lineups = []      # (spike, lineup id) for each lineup used this match
         waiting_reason = refused = None
         retry_at = 0.0
         self.on_log("Watching the minimap.")
@@ -378,6 +381,7 @@ class Watcher:
                 reader = MinimapReader(silhouette, frame.shape[0], MinimapReader.stored_scale(frame.shape))
                 opened = pending = last_spike = None
                 locked = False
+                used_lineups = []
                 description = f"{map_item['name']} / {agent_item['name']} / {target[2]}"
                 self.on_log(f"Match: {description} ({len(lineups)} lineups)")
                 self.on_state(match=description, lineup="")
@@ -410,6 +414,7 @@ class Watcher:
                 over = ("a new round started" if sides.rounds != opened_round
                         else "the spike is gone" if unplanted >= SPIKE_GONE_READS else None)
                 if over:
+                    used_lineups.append((opened_spike, opened["id"]))
                     opened = pending = last_spike = None
                     locked = False
                     self.on_log(f"Closing the lineup: {over}.")
@@ -471,8 +476,14 @@ class Watcher:
             last_spike = reading.spike
             if not steady:
                 continue
+            # Same plant as an earlier round: count how often each lineup was used there.
+            used = Counter(
+                lineup_id for spike, lineup_id in used_lineups
+                if geometry.metres(map_item, spike, reading.spike) <= SAME_PLANT_METRES
+            )
             lineup = selector.choose(
-                map_item, lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item), threats.active(now)
+                map_item, lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item),
+                threats.active(now), used,
             )
             if lineup is None:
                 self.on_state(lineup="none lands on the spike")
@@ -482,7 +493,14 @@ class Watcher:
             if lineup["id"] != pending:
                 pending = lineup["id"]
                 continue
-            opened, opened_round, unplanted = lineup, sides.rounds, 0
+            opened, opened_round, unplanted, opened_spike = lineup, sides.rounds, 0, reading.spike
+            if used:
+                usual = selector.choose(
+                    map_item, lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item),
+                    threats.active(now),
+                )
+                if usual is not None and usual["id"] != lineup["id"]:
+                    self.on_log(f"Not using {usual['title']} again: used {used[usual['id']]} times for this plant.")
             where = f"spike {reading.spike[0]:.0f},{reading.spike[1]:.0f}"
             if last_player is not None:
                 where += f" / you {last_player[0]:.0f},{last_player[1]:.0f}"

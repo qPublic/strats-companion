@@ -105,6 +105,12 @@ lineup's standing spot it is locked in for the rest of the round, threats
 included, and nothing else is opened until the spike is gone (`LOCK_METRES`
 in `companion/watcher.py`).
 
+To stay unpredictable, once a lineup has been used twice for the same plant
+(spikes within 3 m of each other) during a match, the next plant there gets
+the best other lineup; when every lineup has had two turns, the least used
+one is picked (`REPEAT_LIMIT` in `companion/selector.py`). The count starts
+again on a new map or side.
+
 When the spike is defused or explodes (its indicator gone for 3 reads in a
 row) or the next round starts, the lineup is closed and Strats.gg goes back to
 the map, so the next lineup is a single click away.

@@ -7,8 +7,9 @@ turned. All of it comes from the screen:
 - heading: the pointer on that icon, which shows the way the player faces;
 - pitch (looking up or down): vertical edges of walls and doors lean towards a
   common point that moves with the pitch;
-- between those readings, the shift of the picture from one frame to the next,
-  which follows every small turn of the mouse.
+- between those readings, the camera's turn from one frame to the next, from
+  scenery matched between the two frames, which follows every small movement
+  of the mouse and ignores anything fixed on screen (crosshair, HUD).
 
 The absolute readings are noisy and the frame-to-frame shifts drift, so the
 heading and pitch follow the shifts and are pulled gently towards the absolute
@@ -23,7 +24,7 @@ import cv2
 import numpy as np
 
 from . import geometry
-from .aim import HORIZONTAL_FOV, WEAPON, _OneEuro, mss_grabber, scenery_region
+from .aim import HORIZONTAL_FOV, WEAPON, _OneEuro, _bearings, _mask, _rotations, scenery_region, screen_grabber
 from .minimap import ROI_FRACTION
 
 EYE_HEIGHT = 1.55               # metres from the floor to the camera
@@ -32,11 +33,18 @@ PIN_HEIGHT = 2.2                # metres: a post standing in the ring, visible o
 RING_POINTS = 36
 PERIOD = 1 / 40
 WORK_WIDTH = 960                # the scene is read at this width
-SHIFT_REGION = (0.30, 0.16, 0.70, 0.52)   # middle of the screen, above the weapon: used for frame-to-frame shifts
-HEADING_PULL = 0.2              # how strongly each minimap reading corrects the heading
-PITCH_PULL = 0.15               # how strongly each vertical-edge reading corrects the pitch
+TURN_WIDTH = 640                # frames are matched to each other at this width
+TURN_FEATURES = 700
+TURN_RANSAC_ROUNDS = 128
+TURN_INLIER_DEGREES = 0.5
+MIN_TURN_MATCHES = 12
+STILL_DEGREES = 0.05            # a match that moved less than this stayed put on screen
+MOVING_SHARE = 0.5              # the camera turned if more than this share of the matches moved
+# The absolute readings are noisy; each only nudges the estimate, which follows the frame-to-frame turns.
+HEADING_PULL = 0.03             # per minimap reading (about 30 a second): settles in a second or so
+PITCH_PULL = 0.08               # per vertical-edge reading (4 a second): settles in a few seconds
+MAX_STEP_METRES = 2.5           # a minimap position this far from the last one is a misread
 PITCH_PERIOD = 0.25             # seconds between vertical-edge readings (a separate thread)
-SHIFT_SCALE = 0.5               # the middle of the screen is shrunk this much for frame-to-frame shifts
 MIN_EDGES = 6
 NEAREST = 0.4                   # metres in front of the camera; anything nearer is not drawn
 
@@ -108,16 +116,18 @@ def project(points, heading, pitch, screen):
 class GroundTracker:
     """Keeps the standing-spot marker in place in the world while the player walks to it."""
 
-    def __init__(self, reader, map_item, spot, publish, also_stop=None, grabber=mss_grabber):
+    def __init__(self, reader, map_item, spot, publish, also_stop=None, grabber=screen_grabber):
         self.reader, self.map_item, self.spot, self.publish = reader, map_item, spot, publish
         self.grabber = grabber
         self.registration = None          # kept up to date by the watcher's minimap reads
         self.stopped = threading.Event()
         self.also_stop = also_stop or threading.Event()
         self.heading = self.pitch = None
-        self.position = _OneEuro(min_cutoff=1.0, beta=0.05)
+        self.position = _OneEuro(min_cutoff=0.5, beta=0.4)
+        self.last_place = None
         self.icon = None
         self.measured_pitch = None      # (degrees, when) from the vertical-edge thread
+        self.used_pitch = 0.0
 
     def start(self):
         for loop in (self._loop, self._pitch_loop):
@@ -141,11 +151,14 @@ class GroundTracker:
         grab, screen = self.grabber()
         width, height = screen
         side = int(height * ROI_FRACTION)
-        left, top, right, bottom = SHIFT_REGION
-        shift_area = (int(left * width), int(top * height), int((right - left) * width), int((bottom - top) * height))
-        focal = _focal(width) * SHIFT_SCALE
-        previous = window = None
-        used_pitch = 0.0
+        area = scenery_region(*screen)
+        scale = TURN_WIDTH / area[2]
+        orb, matcher = cv2.ORB_create(TURN_FEATURES), cv2.BFMatcher(cv2.NORM_HAMMING)
+        work_screen = (int(round(width * scale)), int(round(height * scale)))
+        work_origin = (int(round(area[0] * scale)), int(round(area[1] * scale)))
+        mask = None
+        previous = None
+        random = np.random.default_rng(0)
         while not self._done():
             started = time.perf_counter()
             registration = self.registration
@@ -163,17 +176,22 @@ class GroundTracker:
                 place, facing, icon = self.reader.player_and_facing(grab(0, 0, side, side), registration)
             self.icon = icon
 
-            # Frame-to-frame turn of the camera, from how far the middle of the picture shifted.
-            middle = cv2.cvtColor(cv2.resize(grab(*shift_area), None, fx=SHIFT_SCALE, fy=SHIFT_SCALE,
-                                             interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY).astype(np.float32)
-            if window is None or window.shape != middle.shape:
-                window = cv2.createHanningWindow(middle.shape[::-1], cv2.CV_32F)
-            if previous is not None and self.heading is not None:
-                (dx, dy), response = cv2.phaseCorrelate(previous, middle, window)
-                if response > 0.1:
-                    self.heading += np.degrees(np.arctan(-dx / focal))
-                    self.pitch += np.degrees(np.arctan(dy / focal))
-            previous = middle
+            # The camera's turn since the last frame, from scenery matched between the two.
+            gray = cv2.cvtColor(cv2.resize(grab(*area), None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA),
+                                cv2.COLOR_BGR2GRAY)
+            if mask is None or mask.shape != gray.shape:
+                mask = _mask(*work_screen, work_origin, (gray.shape[1], gray.shape[0]))
+            keypoints, descriptors = orb.detectAndCompute(gray, mask)
+            current = None
+            if descriptors is not None and len(keypoints) >= MIN_TURN_MATCHES:
+                points = np.float64([k.pt for k in keypoints]) + work_origin
+                current = (_bearings(points, *work_screen), descriptors)
+            if previous is not None and current is not None and self.heading is not None:
+                turn = self._turn(previous, current, matcher, random)
+                if turn is not None:
+                    self.heading += turn[0]
+                    self.pitch += turn[1]
+            previous = current
 
             if facing is not None:
                 if self.heading is None:
@@ -181,16 +199,49 @@ class GroundTracker:
                 else:
                     self.heading += HEADING_PULL * ((facing - self.heading + 180) % 360 - 180)
             measured = self.measured_pitch
-            if measured is not None and measured[1] > used_pitch:
-                used_pitch = measured[1]
+            if measured is not None and measured[1] > self.used_pitch:
+                self.used_pitch = measured[1]
                 self.pitch = measured[0] if self.pitch is None else self.pitch + PITCH_PULL * (measured[0] - self.pitch)
             if self.pitch is None:
                 self.pitch = 0.0
 
-            if place is not None and self.heading is not None:
-                where = self.position(np.array(place, float), time.perf_counter())
+            if place is not None and self.last_place is not None and \
+                    geometry.metres(self.map_item, place, self.last_place) > MAX_STEP_METRES:
+                place = None                      # the icon search caught something else for a moment
+            if place is not None:
+                self.last_place = place
+            if self.last_place is not None and self.heading is not None:
+                where = self.position(np.array(self.last_place, float), time.perf_counter())
                 self.publish(self._marker(where, screen))
             self.stopped.wait(max(0.0, PERIOD - (time.perf_counter() - started)))
+
+    @staticmethod
+    def _turn(previous, current, matcher, random):
+        """(degrees right, degrees up) the camera turned between two frames, or None if they do not match."""
+        pairs = matcher.knnMatch(previous[1], current[1], k=2)
+        good = [pair[0] for pair in pairs if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance]
+        if len(good) < MIN_TURN_MATCHES:
+            return None
+        source = previous[0][[m.queryIdx for m in good]]
+        target = current[0][[m.trainIdx for m in good]]
+        # Things fixed on screen (crosshair, banners, the HUD) match themselves in place. Once the
+        # scenery is clearly moving, those matches say nothing about the turn: leave them out.
+        moved = np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", source, target), -1, 1)))
+        # Only when most of it moves: drifting clouds or water alone are not the camera turning.
+        if (moved > STILL_DEGREES).sum() >= MIN_TURN_MATCHES and (moved > STILL_DEGREES).mean() > MOVING_SHARE:
+            keep = moved > STILL_DEGREES
+            source, target = source[keep], target[keep]
+        picks = random.integers(0, len(source), (TURN_RANSAC_ROUNDS, 2))
+        picks = picks[picks[:, 0] != picks[:, 1]]
+        candidates = _rotations(source[picks], target[picks])
+        inliers = np.einsum("rij,nj,ni->rn", candidates, source, target) > np.cos(np.radians(TURN_INLIER_DEGREES))
+        best = inliers[np.argmax(inliers.sum(axis=1))]
+        if best.sum() < MIN_TURN_MATCHES:
+            return None
+        rotation = _rotations(source[best], target[best])
+        # Where the last frame's straight-ahead now appears: left of centre after turning right, below after looking up.
+        x, y, z = rotation @ np.array([0.0, 0.0, 1.0])
+        return float(-np.degrees(np.arctan2(x, z))), float(np.degrees(np.arctan2(y, np.hypot(x, z))))
 
     def _pitch_loop(self):
         """Reads the pitch from vertical edges a few times a second, beside the fast loop."""

@@ -1,6 +1,7 @@
 """Thin Windows helpers: window lookup, window capture, screen capture, mouse clicks."""
 
 import ctypes
+import threading
 import time
 from ctypes import wintypes
 
@@ -101,14 +102,78 @@ def capture_window(hwnd):
     return pixels[:, :, :3].copy()
 
 
-def capture_screen(region=None):
-    """BGR image of the primary monitor, or of `region` = (left, top, width, height)."""
+# Screen capture goes through Windows' Desktop Duplication (DXGI), the way recording tools capture:
+# a whole 1440p frame takes a few milliseconds there, against close to a hundred through GDI while a
+# game is running. One duplicator runs at CAPTURE_FPS for the whole program and every reader cuts
+# what it needs from its latest frame. GDI (mss) is the fallback.
+CAPTURE_FPS = 60
+_screen_lock = threading.Lock()
+_duplicator = None
+_duplicator_failed = False
+
+
+def _primary_duplicator():
+    global _duplicator, _duplicator_failed
+    with _screen_lock:
+        if _duplicator is None and not _duplicator_failed:
+            try:
+                import dxcam
+
+                device = output = 0
+                for line in dxcam.output_info().splitlines():
+                    if "Primary:True" in line:
+                        device = int(line.split("Device[")[1].split("]")[0])
+                        output = int(line.split("Output[")[1].split("]")[0])
+                camera = dxcam.create(device_idx=device, output_idx=output, output_color="BGR")
+                camera.start(target_fps=CAPTURE_FPS, video_mode=True)
+                threading.Thread(target=_keep_latest, args=(camera,), daemon=True).start()
+                deadline = time.time() + 2
+                while _latest_frame is None and time.time() < deadline:
+                    time.sleep(0.02)
+                _duplicator = camera
+            except Exception:  # noqa: BLE001 - any failure here just means falling back to GDI
+                _duplicator_failed = True
+        return _duplicator
+
+
+_latest_frame = None
+
+
+def _keep_latest(camera):
+    """Hold on to the newest frame, so readers never wait for the next one."""
+    global _latest_frame
+    while True:
+        frame = camera.get_latest_frame()      # waits for a new frame
+        if frame is not None:
+            _latest_frame = frame
+
+
+def capture_screen(region=None, copy=True):
+    """BGR image of the primary monitor, or of `region` = (left, top, width, height).
+
+    With copy=False the picture may be a view of the capture buffer, cheaper for
+    a reader that only shrinks or converts it straight away.
+    """
+    camera = _primary_duplicator()
+    if camera is not None:
+        frame = _latest_frame
+        if frame is not None:
+            if region is None:
+                return frame.copy() if copy else frame
+            left, top, width, height = (int(v) for v in region)
+            part = frame[top:top + height, left:left + width]
+            return part.copy() if copy else part
     with mss.mss() as grabber:
         if region is None:
             area = grabber.monitors[1]
         else:
             area = {"left": region[0], "top": region[1], "width": region[2], "height": region[3]}
         return np.asarray(grabber.grab(area))[:, :, :3].copy()
+
+
+def screen_size():
+    """(width, height) of the primary monitor in pixels."""
+    return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
 
 def click(x, y, settle=0.05):

@@ -37,6 +37,9 @@ MAX_RED_OUTSIDE = 0.2         # ...on the map, not amid red. Fire seen through t
 # Dead teammates are marked with a blue X (dead enemies with a red one, which is ignored).
 DEATH_SIZE = (0.3, 1.3)       # X width and height as a fraction of an icon's diameter
 MAX_DEATH_FILL = 0.8          # an X covers part of its box; a solid blob covers nearly all of it
+X_STROKE = 0.22               # how far (as a fraction of its box) a pixel may be from an X's diagonal
+MIN_ON_STROKES = 0.75
+MIN_EACH_STROKE = 0.25
 SPIKE_AREA = (0.0001, 0.0015)  # blob area as a fraction of the on-screen map square
 # Spike indicator that replaces the round timer once the spike is planted,
 # as (left, top, right, bottom) fractions of the frame.
@@ -77,8 +80,9 @@ class Reading:
 def _pointer_angle(roi, center, radius):
     """Screen angle (degrees; 0 right, 90 down) of the white pointer on the player's icon ring, or None.
 
-    The pointer is a small solid white triangle on the ring, on the side the
-    player faces; thin white map outlines are eroded away first.
+    The pointer is a small white triangle just outside the ring, on the side the
+    player faces. Thin white map outlines can cross the same band, but the
+    triangle gives the densest direction, so the strongest direction wins.
     """
     reach = int(radius * 1.7) + 2
     x0, y0 = max(0, int(center[0]) - reach), max(0, int(center[1]) - reach)
@@ -86,20 +90,35 @@ def _pointer_angle(roi, center, radius):
     if patch.size == 0:
         return None
     hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
-    white = ((hsv[:, :, 1] < 45) & (hsv[:, :, 2] > 235)).astype(np.uint8)
-    white = cv2.erode(white, np.ones((3, 3), np.uint8)) > 0
+    white = (hsv[:, :, 1] < 50) & (hsv[:, :, 2] > 225)
     ys, xs = np.mgrid[0:patch.shape[0], 0:patch.shape[1]]
     dx, dy = xs + x0 - center[0], ys + y0 - center[1]
     distance = np.hypot(dx, dy)
-    ring = white & (distance > radius) & (distance < radius * 1.6)
-    if ring.sum() < MIN_POINTER_PIXELS:
+    band = white & (distance > radius * 1.05) & (distance < radius * 1.5)
+    if band.sum() < MIN_POINTER_PIXELS:
         return None
-    angles = np.degrees(np.arctan2(dy[ring], dx[ring]))
-    counts, edges = np.histogram(angles, bins=36, range=(-180, 180))
-    peak = edges[int(np.argmax(counts))] + 5
-    near = np.abs((angles - peak + 180) % 360 - 180) <= 25
+    angles = np.degrees(np.arctan2(dy[band], dx[band]))
+    counts, edges = np.histogram(angles, bins=24, range=(-180, 180))
+    peak = edges[int(np.argmax(counts))] + 7.5
+    near = np.abs((angles - peak + 180) % 360 - 180) <= 22
     return float(np.degrees(np.arctan2(np.sin(np.radians(angles[near])).mean(),
                                        np.cos(np.radians(angles[near])).mean())))
+
+
+def _x_shaped(blob):
+    """Whether a blob's pixels lie along both diagonals of its box, as the strokes of an X do.
+
+    Blue scenery seen through the minimap (Pearl is full of it) makes blobs of
+    any shape; a dead teammate's marker is an X.
+    """
+    ys, xs = np.nonzero(blob)
+    if len(xs) < 6:
+        return False
+    u = (xs + 0.5) / blob.shape[1]
+    v = (ys + 0.5) / blob.shape[0]
+    falling, rising = np.abs(u - v) < X_STROKE, np.abs(u + v - 1) < X_STROKE
+    on_stroke = falling | rising
+    return on_stroke.mean() >= MIN_ON_STROKES and falling.mean() >= MIN_EACH_STROKE and rising.mean() >= MIN_EACH_STROKE
 
 
 def spike_planted(frame):
@@ -344,13 +363,16 @@ class MinimapReader:
         diameter = 2 * ICON_RADIUS * registration.scale
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         blue = cv2.inRange(hsv, (100, 90, 120), (125, 255, 255))
-        count, _, stats, centers = cv2.connectedComponentsWithStats(cv2.dilate(blue, np.ones((2, 2), np.uint8)))
+        count, labels, stats, centers = cv2.connectedComponentsWithStats(cv2.dilate(blue, np.ones((2, 2), np.uint8)))
         deaths = []
         for index in range(1, count):
             width, height, area = stats[index][cv2.CC_STAT_WIDTH], stats[index][cv2.CC_STAT_HEIGHT], stats[index][cv2.CC_STAT_AREA]
+            left, top = stats[index][cv2.CC_STAT_LEFT], stats[index][cv2.CC_STAT_TOP]
             if not all(DEATH_SIZE[0] * diameter <= side <= DEATH_SIZE[1] * diameter for side in (width, height)):
                 continue
-            if area > MAX_DEATH_FILL * width * height or not self._on_map(registration, centers[index], self.inside):
+            if area > MAX_DEATH_FILL * width * height or not self._on_map(registration, centers[index], self.walkable):
+                continue
+            if not _x_shaped(labels[top:top + height, left:left + width] == index):
                 continue
             deaths.append(tuple(centers[index]))
         return deaths

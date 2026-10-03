@@ -18,7 +18,7 @@ from . import app_cache, broken, driver, geometry, map_shape, selector, strats_a
 from .aim import AimGuide, Tracker
 from .ground import GroundTracker
 from .driver import DriverError, StratsWindow
-from .minimap import MinimapReader
+from .minimap import ICON_RADIUS, MinimapReader
 from .paths import CALIBRATION_FILE
 from .riot_local import ATTACKERS_FIRST, DEFAULT_HALF_LENGTH, NotAvailable, RiotClient, sides_swapped
 
@@ -34,7 +34,9 @@ LOCK_METRES = 25        # once this close to the chosen lineup's standing spot, 
 PREVIEW_SIZE = 360
 PLANTED_INTERVAL = 0.3   # seconds between reads once the spike is down and no lineup is open yet
 IN_POSITION_METRES = 2.0  # this close to the standing spot, the aim guide starts matching the screen
-TEST_SPIKE_CLEARANCE = 3  # test mode: a spike this close to the player is still theirs, not dropped
+# Test mode: the minimap draws a spike badge beside the carrier's icon; a spike this many icon radii
+# from the player's icon is that badge (or was only just dropped), not a spike lying on the ground.
+CARRIED_ICON_RADII = 3.0
 AIM_IMAGE_RETRY = 5.0
 
 
@@ -470,6 +472,7 @@ class Watcher:
         opened_spike = None
         skipped = set()        # lineups passed over with "Next lineup" for the current plant
         immediate = False      # open the next pick at once, without waiting for it to repeat
+        no_lineup_note = None
         used_lineups = []      # (spike, lineup id) for each lineup used this match
         waiting_reason = refused = None
         retry_at = 0.0
@@ -570,10 +573,11 @@ class Watcher:
             reading = reader.read(frame)
             if self.test_mode and not reading.planted and reading.registration is not None:
                 dropped = reader.find_dropped_spike(frame, reading.registration)
-                # A spike right on top of the player is being carried, or was only just dropped.
-                if dropped is not None and reading.player is not None and \
-                        geometry.metres(map_item, dropped, reading.player) <= TEST_SPIKE_CLEARANCE:
-                    dropped = None
+                carrier = reading.player or last_player
+                if dropped is not None and carrier is not None:
+                    gap = np.subtract(reading.registration.to_screen(dropped), reading.registration.to_screen(carrier))
+                    if np.hypot(*gap) <= CARRIED_ICON_RADII * ICON_RADIUS * reading.registration.scale:
+                        dropped = None
                 if dropped is not None:
                     reading.planted, reading.spike = True, dropped
             if self.on_preview is not None:
@@ -690,8 +694,17 @@ class Watcher:
                 if lineup is not None:
                     self.on_log("That was the last lineup for this plant; back to the first.")
             if lineup is None:
-                self.on_state(lineup="none lands on the spike")
+                mollies = selector.post_plant_ability_ids(agent_item)
+                nearest = min((geometry.metres(map_item, geometry.landing_point(item), reading.spike) for item in lineups
+                               if geometry.landing_point(item) and (not mollies or item["abilityId"] in mollies)),
+                              default=None)
+                note = "none lands on the spike" if nearest is None else f"none lands on the spike (nearest {nearest:.0f} m away)"
+                if note != no_lineup_note:
+                    no_lineup_note = note
+                    self.on_log(f"No lineup for this plant: {note[5:]}.")
+                self.on_state(lineup=note)
                 continue
+            no_lineup_note = None
             if opened is not None and lineup["id"] == opened["id"]:
                 continue
             if lineup["id"] != pending and not immediate:

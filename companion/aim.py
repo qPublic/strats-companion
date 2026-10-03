@@ -36,6 +36,10 @@ MIN_NEAR = 8                    # ...decides the final fit when there is this mu
 # what is left out is the HUD and the weapon in the lower right.
 SCENERY = (0.12, 0.11, 0.88, 0.80)
 WEAPON = (0.58, 0.36, 1.0, 1.0)
+# Also left out: things drawn in the same place on every screen, which match themselves and say
+# nothing about where the camera points. The minimap corner (16:9) and the performance graphs
+# many players, and Strats.gg's own screenshots, show at the top right.
+FIXED_ON_SCREEN = ((0.0, 0.0, 0.27, 0.48), (0.80, 0.0, 1.0, 0.32))
 
 
 @dataclass
@@ -58,8 +62,8 @@ def _mask(width, height, origin=(0, 0), size=None):
     mask = np.zeros((height, width), np.uint8)
     left, top, right, bottom = SCENERY
     mask[int(top * height):int(bottom * height), int(left * width):int(right * width)] = 255
-    left, top, right, bottom = WEAPON
-    mask[int(top * height):int(bottom * height), int(left * width):int(right * width)] = 0
+    for left, top, right, bottom in (WEAPON, *FIXED_ON_SCREEN):
+        mask[int(top * height):int(bottom * height), int(left * width):int(right * width)] = 0
     if size is None:
         return mask
     crop = np.zeros((size[1], size[0]), np.uint8)
@@ -113,6 +117,12 @@ class AimGuide:
         self.points = np.asarray(points, np.float64).reshape(-1, 2)
         self.descriptors = None if descriptors is None or len(descriptors) == 0 else np.asarray(descriptors, np.uint8)
         self.size = (int(size[0]), int(size[1]))
+        if self.descriptors is not None and len(self.points):
+            # Data stored by older versions may hold features from parts now left out of matching.
+            mask = _mask(*self.size)
+            keep = mask[np.clip(self.points[:, 1].astype(int), 0, self.size[1] - 1),
+                        np.clip(self.points[:, 0].astype(int), 0, self.size[0] - 1)] > 0
+            self.points, self.descriptors = self.points[keep], self.descriptors[keep]
         self.keypoints = self.points             # only their number and positions are used
         width, height = self.size
         self.bearings = _bearings(self.points, width, height)
@@ -197,6 +207,9 @@ MATCH_PERIOD = 1 / 12           # full matches, which correct any drift, this of
 PATCH = 72                      # side of the patch of scenery around the aim point that is followed (screen pixels)
 SEARCH = 150                    # how far that patch may move between two follows
 MIN_FOLLOW_SCORE = 0.6
+UNIQUE_GAP = 6                  # pixels around the best place that are the same place
+MIN_UNIQUENESS = 0.12           # how much better the best place must fit than anywhere else
+FOLLOW_SILENCE = 0.15           # seconds without a follow before full matches are shown as they are
 MIN_PATCH_CONTRAST = 6.0        # a featureless patch (sky, a flat wall) cannot be followed
 DRIFT_PIXELS = 1.5              # a full match disagreeing by more than this corrects the follower
 HISTORY_SECONDS = 1.0
@@ -231,19 +244,11 @@ class _OneEuro:
         self.value = None
 
 
-def mss_grabber():
-    """A grab(left, top, width, height) -> BGR function for the primary monitor, for one thread."""
-    import mss
+def screen_grabber():
+    """A grab(left, top, width, height) -> BGR function for the primary monitor, and its size."""
+    from . import win
 
-    grabber = mss.mss()
-    monitor = grabber.monitors[1]
-
-    def grab(left, top, width, height):
-        area = {"left": monitor["left"] + int(left), "top": monitor["top"] + int(top),
-                "width": int(width), "height": int(height)}
-        return np.asarray(grabber.grab(area))[:, :, :3]
-
-    return grab, (monitor["width"], monitor["height"])
+    return (lambda left, top, width, height: win.capture_screen((left, top, width, height), copy=False)), win.screen_size()
 
 
 class Tracker:
@@ -257,7 +262,7 @@ class Tracker:
     was taken, so a late result corrects drift without pulling the reticle back.
     """
 
-    def __init__(self, matcher, publish, grabber=mss_grabber, also_stop=None):
+    def __init__(self, matcher, publish, grabber=screen_grabber, also_stop=None):
         self.matcher, self.publish, self.grabber = matcher, publish, grabber
         self.stopped = threading.Event()
         self.also_stop = also_stop or threading.Event()
@@ -265,6 +270,7 @@ class Tracker:
         self.point = self.template = self.aim = None
         self.history = deque()
         self.filter = _OneEuro()
+        self.last_follow = 0.0
 
     def start(self):
         for loop in (self._match_loop, self._follow_loop):
@@ -319,8 +325,8 @@ class Tracker:
                         if np.linalg.norm(drift) > DRIFT_PIXELS:
                             self.point = self.point + drift
                     self.template, self.aim = template, aim
-                if template is None:
-                    self._send(aim)          # nothing to follow: show the full match as it is
+                if template is None or time.perf_counter() - self.last_follow > FOLLOW_SILENCE:
+                    self._send(aim)          # nothing (reliable) to follow: show the full match as it is
             self.stopped.wait(max(0.0, MATCH_PERIOD - (time.perf_counter() - started)))
 
     @staticmethod
@@ -349,6 +355,7 @@ class Tracker:
                         self.history.append((started, found))
                         while self.history and now - self.history[0][0] > HISTORY_SECONDS:
                             self.history.popleft()
+                    self.last_follow = now
                     steady = self.filter(found, now)
                     on_screen = 0 <= steady[0] < screen[0] and 0 <= steady[1] < screen[1]
                     self._send(Aim((float(steady[0]), float(steady[1])), bool(on_screen), aim.yaw, aim.pitch, aim.matches))
@@ -365,6 +372,12 @@ class Tracker:
         scores = cv2.matchTemplate(window, template, cv2.TM_CCOEFF_NORMED)
         _, best, _, (x, y) = cv2.minMaxLoc(scores)
         if best < MIN_FOLLOW_SCORE:
+            return None
+        # Along a straight edge or across a plain wall the patch fits almost as well a little way off;
+        # then the follower could slide. Only a clear single best place counts.
+        others = scores.copy()
+        others[max(0, y - UNIQUE_GAP):y + UNIQUE_GAP + 1, max(0, x - UNIQUE_GAP):x + UNIQUE_GAP + 1] = -1
+        if best - float(others.max()) < MIN_UNIQUENESS:
             return None
 
         def offset(before, peak, after):

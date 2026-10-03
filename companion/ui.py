@@ -30,6 +30,8 @@ MIN_WIDTH, MIN_HEIGHT = 760, 520
 MIN_PREVIEW = 160
 UPDATE_CHECK_MS = 10 * 60 * 1000      # look for a new release this often while the window is open
 SETTINGS_FILE = DATA_DIR / "settings.json"
+LOG_FILE = DATA_DIR / "companion.log"
+LOG_LIMIT = 2_000_000
 SCALE_LIMITS = (0.85, 2.5)            # how far text and controls shrink or grow with the window
 SCALED_FONTS = ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkHeadingFont")
 WRAP_LENGTH = 250
@@ -404,8 +406,17 @@ class App:
     # ---- display ------------------------------------------------------------
 
     def write_log(self, text):
+        line = f"{datetime.now():%H:%M:%S}  {text}\n"
+        try:
+            # Also kept on disk, for looking into problems after the fact.
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size > LOG_LIMIT:
+                LOG_FILE.replace(LOG_FILE.with_suffix(".old.log"))
+            with LOG_FILE.open("a", encoding="utf-8") as file:
+                file.write(f"{datetime.now():%Y-%m-%d} {line}")
+        except OSError:
+            pass
         self.log.configure(state="normal")
-        self.log.insert("end", f"{datetime.now():%H:%M:%S}  {text}\n")
+        self.log.insert("end", line)
         self.log.see("end")
         self.log.configure(state="disabled")
 

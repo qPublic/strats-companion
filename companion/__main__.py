@@ -147,6 +147,22 @@ def download(args):
     prefetch.run(threading.Event())
 
 
+def selftest(args):
+    """Report how the screen is captured and how fast, for troubleshooting."""
+    from . import win
+
+    started = time.perf_counter()
+    frame = win.capture_screen()
+    first = time.perf_counter() - started
+    started = time.perf_counter()
+    for _ in range(20):
+        win.capture_screen((0, 0, 200, 200))
+    method = "Desktop Duplication" if win._duplicator is not None else "GDI (slower)"
+    print(f"Strats Companion {__version__}")
+    print(f"Screen {frame.shape[1]}x{frame.shape[0]}, captured with {method}")
+    print(f"First capture {first * 1000:.0f} ms, then {(time.perf_counter() - started) / 20 * 1000:.2f} ms per small region")
+
+
 def capture(args):
     """Save a screenshot of the game screen each time a hotkey is pressed (for tuning detection)."""
     import cv2
@@ -203,6 +219,9 @@ def main():
 
     download_parser = commands.add_parser("download", help=download.__doc__)
     download_parser.set_defaults(run=download)
+
+    selftest_parser = commands.add_parser("selftest", help=selftest.__doc__)
+    selftest_parser.set_defaults(run=selftest)
 
     capture_parser = commands.add_parser("capture", help=capture.__doc__)
     capture_parser.add_argument("--key", default="f9")

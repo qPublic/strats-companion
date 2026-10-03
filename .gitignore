@@ -6,3 +6,4 @@ cache/
 captures/
 calibration.json
 *.spec
+companion.log

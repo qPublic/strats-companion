@@ -38,11 +38,15 @@ settings are kept in `%LOCALAPPDATA%\StratsCompanion\settings.json`.
 
 ```
 python -m venv .venv
-.venv\Scripts\python -m pip install requests numpy opencv-python mss keyboard
+.venv\Scripts\python -m pip install requests numpy opencv-python mss keyboard dxcam
 ```
 
 Build the exe with `pyinstaller --onefile --console --name StratsCompanion
---add-data "companion/assets;companion/assets" strats_companion.py`.
+--add-data "companion/assets;companion/assets" --collect-submodules dxcam
+--hidden-import comtypes.stream strats_companion.py`.
+
+The screen is captured with Windows' Desktop Duplication (dxcam), falling back to
+GDI (mss) if that is not available; `selftest` reports which is in use.
 
 ## Commands
 
@@ -56,6 +60,7 @@ From source, run `.venv\Scripts\python -m companion <command>` in this folder.
 | `run [--map ascent --agent viper] [--side attack] [--dry-run] [--video file]` | Watches the minimap about once a second and opens the best post-plant lineup when the spike is planted. Map, agent and side come from the match unless given. `--video` analyses a recording instead of the screen; `--dry-run` only prints the choice. |
 | `follow [--side attack]` | Keeps Strats.gg on the map, agent and side of the match in progress. |
 | `update` | Installs the newest release of the exe, if there is one. |
+| `selftest` | Reports how the screen is captured and how fast. |
 | `capture [--key f9]` | Saves a screenshot of the primary monitor on each key press, for tuning minimap detection. |
 
 Positions are `left,top` in percent of the Strats.gg map image for that side.

@@ -32,6 +32,7 @@ class Overlay:
         self.window = tk.Toplevel(root)
         self.window.withdraw()
         self.window.overrideredirect(True)
+        self.window.title("Strats Companion guide")
         self.window.configure(bg=KEY)
         self.window.attributes("-transparentcolor", KEY)
         self.window.attributes("-topmost", True)

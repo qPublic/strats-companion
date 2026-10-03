@@ -157,7 +157,7 @@ lineup opens. Pick it up and drop it somewhere else for the next one.
 Some lineups no longer work (a map change can break a bounce). Press "Broken
 lineup" while one is open: it is never picked again and the next best one opens
 straight away. "Clear broken (N)" forgets all the marks. The list is kept in
-`%LOCALAPPDATA%\StratsCompanionroken_lineups.json`.
+`%LOCALAPPDATA%\StratsCompanion\broken_lineups.json`.
 
 In test mode, "Next lineup" opens the next lineup for the same plant, ignoring
 the lock, to try several standing spots in a row; after the last one it starts

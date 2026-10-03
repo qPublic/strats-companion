@@ -16,9 +16,8 @@ import requests
 
 from . import app_cache, broken, driver, geometry, map_shape, selector, spot, strats_api, win
 from .aim import AimGuide, Tracker
-from .ground import GroundTracker
-from .driver import DriverError, StratsWindow
-from .minimap import ICON_RADIUS, MinimapReader
+from .driver import LINEUP_PAGE, MAP_VIEW, OTHER, WINDOW_TITLE, DriverError, StratsWindow
+from .minimap import ICON_RADIUS, MIN_CALIBRATION_SCORE, MinimapReader
 from .paths import CALIBRATION_FILE
 from .riot_local import ATTACKERS_FIRST, DEFAULT_HALF_LENGTH, NotAvailable, RiotClient, sides_swapped
 
@@ -38,6 +37,9 @@ IN_POSITION_METRES = 2.0  # this close to the standing spot, the aim guide start
 # from the player's icon is that badge (or was only just dropped), not a spike lying on the ground.
 CARRIED_ICON_RADII = 3.0
 AIM_IMAGE_RETRY = 5.0
+HEALTH_SECONDS = 10         # how often everything is checked and put right
+STALL_SECONDS = 4.0         # a tracker that has drawn nothing for this long is restarted
+LOST_MINIMAP_SECONDS = 20   # minimap not found for this long: look for it again from scratch
 SPOT_ATTEMPTS = 12          # tries at reading a lineup's standing spot from its screenshot...
 SPOT_RETRY_SECONDS = 3.0    # ...this far apart, while Strats.gg loads it
 
@@ -274,16 +276,16 @@ class Watcher:
         self.on_guide = on_guide
         # Practice without planting: a spike dropped on the ground is treated as planted there.
         self.test_mode = test_mode
-        # Set from the window: "broken" (never pick the open lineup again) or "next" (try the next one).
+        # Set from the window: "broken" (never pick the open lineup again), "next" (try the next one)
+        # or "picture" (the open lineup's Strats.gg picture is of something else).
         self.request = None
         self.aim_guides = {}        # lineup id -> (AimGuide, picture) or (None, time of the last try)
         self.guide_shown = False
         self.guide = None           # the latest minimap part of the guide, which the aim tracker adds to
         self.last_aim = None
         self.tracker = None
-        self.ground = None          # GroundTracker while walking to the standing spot
         self.true_spots = {}        # lineup id -> standing spot read from its aim screenshot (or None)
-        self.last_ground = None
+        self.wrong_pictures = broken.picture_ids()
         self.reader = None
         self.stop_event = None
         self.hurry = False
@@ -313,6 +315,8 @@ class Watcher:
 
     def _aim_guide(self, lineup):
         """The aim matcher and screenshot for a lineup, or (None, None) while the screenshot is not to be had."""
+        if lineup["id"] in self.wrong_pictures:
+            return None, None
         known = self.aim_guides.get(lineup["id"])
         if known is not None and known[0] is not None:
             return known
@@ -359,6 +363,8 @@ class Watcher:
                     self.on_log(f"Standing spot for {lineup['title']} taken from its screenshot "
                                 f"({moved:.1f} m from the Strats.gg dot).")
             threading.Thread(target=read, daemon=True).start()
+        if lineup["id"] in self.wrong_pictures:
+            return geometry.standing_spot(lineup)       # a picture of somewhere else says nothing of the spot
         return self.true_spots[lineup["id"]] or geometry.standing_spot(lineup)
 
     def _show_guide(self, frame, reading, lineup, map_item, player):
@@ -374,18 +380,6 @@ class Watcher:
         if player is not None:
             guide["metres"] = geometry.metres(map_item, player, spot)
             guide["in_position"] = guide["metres"] <= IN_POSITION_METRES
-        if guide["in_position"] or self.video is not None or self.reader is None:
-            self._stop_ground()
-        elif self.ground is None or self.ground.lineup_id != lineup["id"]:
-            self._stop_ground()
-            self.ground = GroundTracker(self.reader, map_item, spot, self._publish_ground, also_stop=self.stop_event)
-            self.ground.lineup_id = lineup["id"]
-            self.ground.registration = registration
-            self.ground.start()
-        else:
-            if registration is not None:
-                self.ground.registration = registration
-            self.ground.spot = spot
         # The aim picture shows the whole time the lineup is open; the reticle only once on the spot.
         matcher, guide["picture"] = self._aim_guide(lineup)
         if not guide["in_position"]:
@@ -399,7 +393,7 @@ class Watcher:
             self.tracker = Tracker(matcher, self._publish_aim, also_stop=self.stop_event)
             self.tracker.lineup_id = lineup["id"]
             self.tracker.start()
-        guide["aim"], guide["ground"] = self.last_aim, self.last_ground
+        guide["aim"] = self.last_aim
         self.guide = guide
         self.on_guide(guide)
         self.guide_shown = True
@@ -408,19 +402,7 @@ class Watcher:
         """From the aim tracker's thread: redraw with the newest aim point."""
         self.last_aim = aim
         if self.guide is not None:
-            self.on_guide({**self.guide, "aim": aim, "ground": self.last_ground})
-
-    def _publish_ground(self, marker):
-        """From the ground tracker's thread: redraw with the standing-spot marker where it is now."""
-        self.last_ground = marker
-        if self.guide is not None:
-            self.on_guide({**self.guide, "aim": self.last_aim, "ground": marker})
-
-    def _stop_ground(self):
-        if self.ground is not None:
-            self.ground.stop()
-            self.ground = None
-        self.last_ground = None
+            self.on_guide({**self.guide, "aim": aim})
 
     def _stop_tracker(self):
         if self.tracker is not None:
@@ -430,11 +412,64 @@ class Watcher:
 
     def _hide_guide(self):
         self._stop_tracker()
-        self._stop_ground()
         self.guide = None
         if self.guide_shown:
             self.on_guide(None)
             self.guide_shown = False
+
+    def _health(self, window, maps, agents, map_item, agent_item, side, groups, opened):
+        """Every HEALTH_SECONDS: check that Strats.gg and the in-game guide are as they should be, and fix them."""
+        if self.on_guide is not None:
+            if opened is None:
+                if self.guide_shown or self.tracker is not None:
+                    self._hide_guide()
+                    self.on_log("Check: hid a guide that was left up with no lineup open.")
+            else:
+                if self.tracker is not None and self.tracker.stalled(STALL_SECONDS):
+                    self._stop_tracker()
+                    self.on_log("Check: the aim reticle had stopped; restarting it.")
+                known = self.aim_guides.get(opened["id"])
+                if known is not None and known[0] is None:
+                    self.aim_guides.pop(opened["id"])          # try the aim picture again on the next read
+                if self.true_spots.get(opened["id"], 0) is None and not spot.known(opened["id"]):
+                    self.true_spots.pop(opened["id"])          # and the standing spot from its screenshot
+        if self.drive:
+            self._drive(lambda: self._check_strats(window, maps, agents, map_item, agent_item, side, groups, opened))
+
+    def _check_strats(self, window, maps, agents, map_item, agent_item, side, groups, opened):
+        """On the driving thread: Strats.gg open, and showing the open lineup, or the map (or minimised) otherwise."""
+        found = win.find_windows(WINDOW_TITLE)
+        if not found:
+            self.on_log("Check: Strats.gg was closed; starting it again.")
+            driver.launch(restart=True)     # running without a window, it does not open one when asked again
+            window.shown = None
+            self._park(window, maps, agents, map_item, agent_item, side, groups)
+            return
+        minimised = bool(win.user32.IsIconic(found[0][0]))
+        if opened is None:
+            if minimised:
+                return                                  # set aside between lineups, as asked
+            window.attach()
+            state = window.state(window.capture())
+            if self.hide:
+                window.leave_fullscreen()
+                window.minimize()
+                self.on_log("Check: minimised Strats.gg, which was left open between lineups.")
+            elif state != MAP_VIEW:
+                window.show_map(maps, agents, map_item, agent_item, side, groups)
+                self.on_log("Check: put Strats.gg back on the lineup map.")
+            return
+        window.attach()
+        state = window.state(window.capture())
+        showing = state == LINEUP_PAGE or (state == OTHER and window.fullscreen)
+        if not showing:
+            self.on_log(f"Check: Strats.gg was not showing {opened['title']}; opening it again.")
+            window.show_map(maps, agents, map_item, agent_item, side, groups)
+            if window.open_lineup(groups, selector.group_of(groups, opened), opened) and self.fullscreen:
+                window.fullscreen_video()
+        elif state == LINEUP_PAGE and self.fullscreen:
+            window.fullscreen_video()
+            self.on_log("Check: put the lineup video back to full screen.")
 
     def _drive(self, job):
         """Run a Strats.gg job on the driving thread, after any already waiting."""
@@ -513,8 +548,13 @@ class Watcher:
         if self.drive:
             threading.Thread(target=self._driving, args=(stop,), daemon=True).start()
         pace = self.interval if self.video is not None else (lambda: PLANTED_INTERVAL if self.hurry else self.interval)
+        last_health = time.time()
+        minimap_seen = time.time()
         for index, frame in enumerate(frames(self.video, pace, stop)):
             now = time.time() if self.video is None else index * self.interval
+            if self.video is None and target is not None and time.time() - last_health >= HEALTH_SECONDS:
+                last_health = time.time()
+                self._health(window, maps, agents, map_item, agent_item, target[2], groups, opened)
             if manual:
                 wanted = (self.map_name, self.agent_name, self.side or sides.side())
             elif time.time() - last_match_check >= MATCH_POLL_SECONDS:
@@ -634,7 +674,12 @@ class Watcher:
                         self._park(window, maps, agents, map_item, agent_item, target[2], groups)
             if reading.registration is None:
                 self.on_state(minimap="not visible", spike="planted" if reading.planted else "not planted")
+                if self.video is None and time.time() - minimap_seen > LOST_MINIMAP_SECONDS:
+                    minimap_seen = time.time()
+                    if reader.calibrate(frame, thorough=False) >= MIN_CALIBRATION_SCORE:
+                        self.on_log(f"Check: found the minimap again (zoom {reader.scale}).")
                 continue
+            minimap_seen = time.time()
             if self.side is None:
                 respawned = sides.observe_spawn(reading, now, map_item, target[2])
                 for news in sides.respawn_news:
@@ -682,6 +727,11 @@ class Watcher:
                 request, self.request = self.request, None
                 if opened is None:
                     self.on_log("No lineup is open.")
+                elif request == "picture":
+                    broken.mark_picture(opened)
+                    self.wrong_pictures.add(opened["id"])
+                    self._stop_tracker()
+                    self.on_log(f"Marked the picture of {opened['title']} as wrong; it and its reticle will not be shown.")
                 else:
                     if request == "broken":
                         broken.mark(opened)

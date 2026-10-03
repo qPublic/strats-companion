@@ -277,6 +277,8 @@ class Tracker:
         self.history = deque()
         self.filter = _OneEuro()
         self.last_follow = 0.0
+        self.last_sent = 0.0
+        self.started = time.perf_counter()
 
     def start(self):
         for loop in (self._match_loop, self._follow_loop):
@@ -298,7 +300,12 @@ class Tracker:
 
     def _send(self, aim):
         if not self._done():
+            self.last_sent = time.perf_counter()
             self.publish(aim)
+
+    def stalled(self, seconds):
+        """Whether nothing has been drawn for `seconds` since it started."""
+        return time.perf_counter() - max(self.last_sent, self.started) > seconds
 
     def _point_at(self, moment):
         """Where the follower had the aim point at `moment`, or None."""

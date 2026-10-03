@@ -139,14 +139,6 @@ With "Show in-game guide" ticked, the chosen lineup is drawn over the game
 - **Where to stand**, on the minimap: a ring on the standing spot, a dashed
   line to where it lands, and the distance, which turns to "In position"
   within 2 m.
-- **Where to stand, in the world**: a ring on the floor at the standing spot
-  with a post and the distance, drawn in perspective where the spot is, so you
-  can walk to it without looking at the minimap. When the spot is behind you
-  or off screen, an arrow along the bottom says which way to turn. The camera
-  is worked out from the screen: position from your minimap icon, facing from
-  the pointer on it, looking up or down from how vertical edges lean, and
-  every small turn in between from how the picture shifts (about 30 times a
-  second). The floor is taken to be level with your feet.
 - **The aim picture**: the lineup's aim screenshot, with its aim point marked,
   stays on the right of the screen the whole time the lineup is open, to check
   the reticle against.
@@ -172,6 +164,19 @@ in the cache folder's aim directory). The background download fetches these
 for every agent's mollies, and when a match starts, the stored data for its
 map, agent and side is loaded, so nothing is fetched when the spike goes down.
 
+## Self-checks
+
+Every 10 seconds while watching, the companion checks that everything is as it
+should be and puts right what is not, noting each fix in the log ("Check: ..."):
+
+- Strats.gg is running (started again if it was closed); between lineups it
+  is minimised (or on the lineup map); with a lineup open it shows that
+  lineup, in full screen if that option is on.
+- The in-game guide is up exactly while a lineup is open, on top of the game;
+  a stopped aim reticle is restarted; a missing aim picture
+  or standing spot is tried again.
+- If the minimap has not been found for 20 seconds, it is looked for afresh.
+
 ## Test mode
 
 With "Test mode: a dropped spike counts as planted" ticked, a spike lying on
@@ -184,8 +189,14 @@ lineup opens. Pick it up and drop it somewhere else for the next one.
 
 Some lineups no longer work (a map change can break a bounce). Press "Broken
 lineup" while one is open: it is never picked again and the next best one opens
-straight away. "Clear broken (N)" forgets all the marks. The list is kept in
+straight away. The list is kept in
 `%LOCALAPPDATA%\StratsCompanion\broken_lineups.json`.
+
+A few lineups on Strats.gg have a picture of something else under their Image
+tab (the video is right, the picture is not). Press "Wrong picture" while such
+a lineup is open: its picture and aim reticle are no longer shown, and the
+lineup itself stays in use. That list is in `wrong_pictures.json` beside the
+other. "Clear marks (N)" forgets the marks of both kinds.
 
 In test mode, "Next lineup" opens the next lineup for the same plant, ignoring
 the lock, to try several standing spots in a row; after the last one it starts

@@ -26,6 +26,7 @@ TEXT = "#e6e8ec"
 MUTED = "#8b919c"
 ACCENT = "#ff4655"
 STRATS_TOPMOST_REFRESH_MS = 1000
+HEALTH_MS = 10_000
 MIN_WIDTH, MIN_HEIGHT = 760, 520
 MIN_PREVIEW = 160
 UPDATE_CHECK_MS = 10 * 60 * 1000      # look for a new release this often while the window is open
@@ -116,9 +117,10 @@ class App:
         self.next_button.grid(row=1, column=1, padx=(8, 0), pady=(8, 0), sticky="ew")
         self.clear_button = ttk.Button(buttons, text="", command=self.clear_broken)
         self.clear_button.grid(row=1, column=2, padx=(8, 0), pady=(8, 0), sticky="ew")
+        ttk.Button(buttons, text="Wrong picture", command=self.mark_picture).grid(row=2, column=0, pady=(8, 0), sticky="ew")
         # A key for Next lineup that works while the game has focus; it can be changed and turned off.
         hotkey_row = ttk.Frame(buttons)
-        hotkey_row.grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        hotkey_row.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self.hotkey_on = tk.BooleanVar(value=True)
         self.hotkey = tk.StringVar(value=DEFAULT_HOTKEY)
         self.hotkey_handle = None
@@ -170,6 +172,7 @@ class App:
         ).start()
         root.after(100, self.drain)
         root.after(STRATS_TOPMOST_REFRESH_MS, self._keep_strats_pinned)
+        root.after(HEALTH_MS, self._check_overlay)
 
     # ---- settings and size ----------------------------------------------------
 
@@ -275,8 +278,8 @@ class App:
         self.events.put(("stopped", None))
 
     def _refresh_lineup_buttons(self):
-        count = len(broken.ids())
-        self.clear_button.configure(text=f"Clear broken ({count})", state="normal" if count else "disabled")
+        count = broken.count()
+        self.clear_button.configure(text=f"Clear marks ({count})", state="normal" if count else "disabled")
         # Trying lineup after lineup on one plant is for practice only.
         self.next_button.configure(state="normal" if self.test_mode.get() else "disabled")
 
@@ -289,6 +292,11 @@ class App:
 
     def mark_broken(self):
         if self._send("broken"):
+            self.root.after(1500, self._refresh_lineup_buttons)
+
+    def mark_picture(self):
+        """The open lineup's picture on Strats.gg is of something else: stop showing it and its reticle."""
+        if self._send("picture"):
             self.root.after(1500, self._refresh_lineup_buttons)
 
     def next_lineup(self):
@@ -326,7 +334,7 @@ class App:
         threading.Thread(target=listen, daemon=True).start()
 
     def clear_broken(self):
-        self.write_log(f"Cleared {broken.clear()} broken lineup marks.")
+        self.write_log(f"Cleared {broken.clear()} broken-lineup and wrong-picture marks.")
         self._refresh_lineup_buttons()
 
     def recalibrate(self):
@@ -402,6 +410,19 @@ class App:
                 win.set_topmost(hwnd, True)
             self._raise_self()
         self.root.after(STRATS_TOPMOST_REFRESH_MS, self._keep_strats_pinned)
+
+    def _check_overlay(self):
+        """Every 10 seconds: the in-game guide is up exactly while a lineup is open, on top, and fully drawn."""
+        guide = None if self.watcher is None or not self.show_guide.get() else self.watcher.guide
+        running = self.worker is not None and self.worker.is_alive()
+        if guide is not None and running:
+            if not self.overlay.visible:
+                self.write_log("Check: the in-game guide was hidden with a lineup open; showing it.")
+            self.overlay.redraw(guide)
+        elif self.overlay.visible:
+            self.overlay.show(None)
+            self.write_log("Check: hid the in-game guide, as no lineup is open.")
+        self.root.after(HEALTH_MS, self._check_overlay)
 
     # ---- display ------------------------------------------------------------
 

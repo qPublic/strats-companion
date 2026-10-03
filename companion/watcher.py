@@ -356,7 +356,7 @@ class Watcher:
             if not steady:
                 continue
             lineup = selector.choose(
-                lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item), threats.active(now)
+                map_item, lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item), threats.active(now)
             )
             if lineup is None:
                 self.on_state(lineup="none lands on the spike")

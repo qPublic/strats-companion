@@ -50,5 +50,10 @@ def metres(map_item, a, b):
     return distance(a, b) / 100 / abs(map_item["xMultiplier"]) / 100
 
 
+def map_distance(map_item, metres):
+    """A distance in metres as map coordinates (percent of the map image) on this map."""
+    return metres * 100 * abs(map_item["xMultiplier"]) * 100
+
+
 def standing_spot(lineup):
     return lineup["left"], lineup["top"]

@@ -2,12 +2,14 @@
 
 from . import geometry
 
-# Map coordinates are percent of the map image; 1% is roughly 1.4 m in game.
-SPIKE_RADIUS = 3.5
+# Distances in metres. Maps differ in size, so each is converted with that map's
+# scale (see geometry.metres) before comparing with map coordinates.
+# A lineup counts when it lands this close to the spike (about a molly's radius).
+SPIKE_RADIUS = 4.5
 # How far from the player a standing spot may be and still count as "not too far".
-MAX_WALK = 25.0
+MAX_WALK = 35.0
 # Standing spots this close to a recently spotted enemy or a teammate's death are avoided.
-DANGER_RADIUS = 10.0
+DANGER_RADIUS = 14.0
 
 # Abilities that stop or punish a defuse. Lineups using one of these win over
 # anything else that happens to land near the spike (smokes, recon, traps).
@@ -32,8 +34,8 @@ def in_cone(spot, spike):
     return down > 0 and abs(across) <= down
 
 
-def choose(lineups, spike, player=None, preferred_abilities=(), threats=(), radius=SPIKE_RADIUS):
-    """The best lineup landing within `radius` of the spike, or None when nothing lands there.
+def choose(map_item, lineups, spike, player=None, preferred_abilities=(), threats=()):
+    """The best lineup landing within SPIKE_RADIUS of the spike, or None when nothing lands there.
 
     Lineups using a preferred ability are considered first. Standing spots
     within DANGER_RADIUS of a threat (a spotted enemy or a teammate's death) are
@@ -48,7 +50,7 @@ def choose(lineups, spike, player=None, preferred_abilities=(), threats=(), radi
         landing = geometry.landing_point(lineup)
         if landing is None:
             continue
-        if geometry.distance(landing, spike) <= radius:
+        if geometry.distance(landing, spike) <= geometry.map_distance(map_item, SPIKE_RADIUS):
             candidates.append(lineup)
     preferred = [lineup for lineup in candidates if lineup["abilityId"] in preferred_abilities]
     candidates = preferred or candidates
@@ -60,7 +62,7 @@ def choose(lineups, spike, player=None, preferred_abilities=(), threats=(), radi
         spot = geometry.standing_spot(lineup)
         return min((geometry.distance(spot, threat) for threat in threats), default=float("inf"))
 
-    safe = [lineup for lineup in candidates if danger(lineup) > DANGER_RADIUS]
+    safe = [lineup for lineup in candidates if danger(lineup) > geometry.map_distance(map_item, DANGER_RADIUS)]
     if not safe:
         return max(candidates, key=danger)
 
@@ -70,7 +72,7 @@ def choose(lineups, spike, player=None, preferred_abilities=(), threats=(), radi
     cone = [lineup for lineup in safe if in_cone(geometry.standing_spot(lineup), spike)]
     if cone:
         if player is not None:
-            reachable = [lineup for lineup in cone if geometry.distance(geometry.standing_spot(lineup), player) <= MAX_WALK]
+            reachable = [lineup for lineup in cone if geometry.distance(geometry.standing_spot(lineup), player) <= geometry.map_distance(map_item, MAX_WALK)]
             cone = reachable or cone
         return min(cone, key=from_spike)
     if player is not None:

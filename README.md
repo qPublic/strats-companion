@@ -67,11 +67,10 @@ loads them, and reads them from there.
 
 ## How a lineup is chosen
 
-A lineup qualifies when it lands within 3.5% of the map (about 5 m) of the
-spike. Lineups using a post-plant ability (mollies, shock darts and similar,
+A lineup qualifies when it lands within 4.5 m of the spike. Lineups using a post-plant ability (mollies, shock darts and similar,
 listed in `companion/selector.py`) win over others.
 
-Standing spots within 10% of the map (about 14 m) of a threat are skipped. A
+Standing spots within 14 m of a threat are skipped. A
 threat is an enemy seen on the minimap (red-ringed icon) or a place where a
 teammate died (blue X), and each one is forgotten 10 seconds after it was last
 seen, on the assumption that the enemy has moved. If every spot is that close
@@ -79,9 +78,10 @@ to a threat, the one farthest from them is opened.
 
 Of the rest, the one thrown from closest to the spike inside a right-angle
 cone opening south from the spike (down the map, towards your own side) is
-opened, preferring spots within 25% of the map (about 35 m) of you. If no spot
+opened, preferring spots within 35 m of you. If no spot
 is in the cone, the standing spot nearest you is opened instead. The limits
-are `MAX_WALK` and `DANGER_RADIUS` in `companion/selector.py`;
+are `SPIKE_RADIUS`, `MAX_WALK` and `DANGER_RADIUS` in `companion/selector.py`,
+in metres and converted with each map's own scale;
 `THREAT_SECONDS` is in `companion/watcher.py`.
 
 The pick can change while you move. Once you are within 25 m of the opened

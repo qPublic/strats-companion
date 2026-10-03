@@ -55,7 +55,7 @@ def show(args):
         if args.spike is None:
             print(f"Showing {map_item['name']} / {agent_item['name']} / {args.side} ({len(lineups)} lineups).")
             return
-        lineup = selector.choose(lineups, args.spike, args.player, selector.post_plant_ability_ids(agent_item))
+        lineup = selector.choose(map_item, lineups, args.spike, args.player, selector.post_plant_ability_ids(agent_item))
         if lineup is None:
             print("No lineup lands on that spike position.")
             return

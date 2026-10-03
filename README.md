@@ -24,8 +24,15 @@ through a window covering them. Closing the companion releases Strats.gg.
 
 ## Updates
 
-The window checks GitHub for a newer release each time it opens and shows an
-"Update and restart" button when there is one. The old exe is kept as `StratsCompanion.old.exe` until the next start.
+The window checks GitHub for a newer release when it opens, every 10 minutes
+while it is open, and whenever you press "Check for updates". When there is
+one, an "Install ... now" button appears. Installing downloads the new exe and
+relaunches it on its own, with the same settings and window size, and carries
+on watching if it was. The old exe is kept as `StratsCompanion.old.exe` until
+the next start.
+
+The window can be resized; text, buttons and checkboxes scale with it. Its
+settings are kept in `%LOCALAPPDATA%\StratsCompanion\settings.json`.
 
 ## Run from source
 

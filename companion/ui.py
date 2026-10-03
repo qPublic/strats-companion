@@ -1,17 +1,19 @@
 """Small control window: pick the match (or leave it on Auto), start watching, see what is detected."""
 
 import base64
+import json
 import queue
 import threading
 import tkinter as tk
 import traceback
 from datetime import datetime
+from tkinter import font as tkfont
 from tkinter import ttk
 
 import cv2
 
 from . import __version__, prefetch, strats_api, updater, win
-from .paths import CAPTURE_DIR
+from .paths import CAPTURE_DIR, DATA_DIR
 from .driver import WINDOW_TITLE as STRATS_TITLE
 from .watcher import PREVIEW_SIZE, Watcher
 
@@ -24,6 +26,11 @@ ACCENT = "#ff4655"
 STRATS_TOPMOST_REFRESH_MS = 1000
 MIN_WIDTH, MIN_HEIGHT = 760, 520
 MIN_PREVIEW = 160
+UPDATE_CHECK_MS = 10 * 60 * 1000      # look for a new release this often while the window is open
+SETTINGS_FILE = DATA_DIR / "settings.json"
+SCALE_LIMITS = (0.85, 2.5)            # how far text and controls shrink or grow with the window
+SCALED_FONTS = ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkHeadingFont")
+WRAP_LENGTH = 250
 STATE_ROWS = (("match", "Match"), ("minimap", "Minimap"), ("spike", "Spike"), ("player", "You"), ("lineup", "Lineup"))
 
 
@@ -36,8 +43,9 @@ class App:
 
         root.title(f"Strats Companion {__version__}")
         self.update = None
+        self.update_checked = False
         root.configure(bg=BACKGROUND)
-        style = ttk.Style()
+        style = self.style = ttk.Style()
         style.theme_use("clam")
         style.configure(".", background=BACKGROUND, foreground=TEXT, fieldbackground=PANEL)
         style.configure("TLabel", background=BACKGROUND, foreground=TEXT)
@@ -79,14 +87,19 @@ class App:
         status = ttk.Frame(root, padding=(14, 6))
         status.grid(row=1, column=0, sticky="nw")
         self.state = {}
+        self.wrapped = []
         for row, (key, label) in enumerate(STATE_ROWS):
             ttk.Label(status, text=label, style="Muted.TLabel", width=9).grid(row=row, column=0, sticky="w", pady=3)
             self.state[key] = tk.StringVar(value="")
-            ttk.Label(status, textvariable=self.state[key], width=34, wraplength=250).grid(row=row, column=1, sticky="w", pady=3)
+            value = ttk.Label(status, textvariable=self.state[key], width=34, wraplength=WRAP_LENGTH)
+            value.grid(row=row, column=1, sticky="w", pady=3)
+            self.wrapped.append(value)
         buttons = ttk.Frame(status)
         buttons.grid(row=len(STATE_ROWS), column=0, columnspan=2, sticky="w", pady=(12, 0))
         ttk.Button(buttons, text="Recalibrate minimap", command=self.recalibrate).grid(row=0, column=0)
         ttk.Button(buttons, text="Save screenshot", command=self.save_screenshot).grid(row=0, column=1, padx=(8, 0))
+        self.check_button = ttk.Button(buttons, text="Check for updates", command=self.check_for_updates)
+        self.check_button.grid(row=0, column=2, padx=(8, 0))
         self.update_button = ttk.Button(status, text="", style="Accent.TButton", command=self.install_update)
         self.update_button.grid(row=len(STATE_ROWS) + 1, column=0, columnspan=2, sticky="w", pady=(12, 0))
         self.update_button.grid_remove()
@@ -105,17 +118,86 @@ class App:
         root.minsize(MIN_WIDTH, MIN_HEIGHT)
         # Fix the opening size, so the window keeps whatever size it has when the preview changes.
         root.update_idletasks()
-        root.geometry(f"{root.winfo_reqwidth()}x{root.winfo_reqheight()}")
+        self.base_size = (root.winfo_reqwidth(), root.winfo_reqheight())
+        self.fonts = {name: tkfont.nametofont(name) for name in SCALED_FONTS}
+        self.font_sizes = {name: font.cget("size") for name, font in self.fonts.items()}
+        self.scale = 1.0
+        self.rescale_pending = None
+        self.resume_after_update = False
+        settings = self._load_settings()
+        root.geometry(settings.get("geometry") or f"{self.base_size[0]}x{self.base_size[1]}")
+        root.bind("<Configure>", self._on_resize)
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         updater.remove_previous()
-        threading.Thread(target=self._check_update, daemon=True).start()
+        self.check_for_updates(manual=False)
+        if settings.get("resume"):
+            # Restarted by an update while watching: carry on.
+            root.after(500, self.toggle_watching)
         self.closing = threading.Event()
         threading.Thread(
             target=prefetch.run, args=(self.closing, lambda text: self.events.put(("log", text))), daemon=True
         ).start()
         root.after(100, self.drain)
         root.after(STRATS_TOPMOST_REFRESH_MS, self._keep_strats_pinned)
+
+    # ---- settings and size ----------------------------------------------------
+
+    def _settings_vars(self):
+        return {
+            "map": self.map_choice, "agent": self.agent_choice, "side": self.side_choice,
+            "drive": self.drive, "pin_self": self.pin_self, "pin_strats": self.pin_strats,
+            "fullscreen": self.fullscreen, "hide_strats": self.hide_strats,
+        }
+
+    def _load_settings(self):
+        try:
+            settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        for name, variable in self._settings_vars().items():
+            if name in settings:
+                variable.set(settings[name])
+        if settings.get("pin_self") or settings.get("pin_strats"):
+            self.root.after(300, self.apply_pins)
+        if settings.get("resume"):
+            self._save_settings(resume=False)
+        return settings
+
+    def _save_settings(self, resume=False):
+        settings = {name: variable.get() for name, variable in self._settings_vars().items()}
+        settings.update(geometry=self.root.geometry(), resume=resume)
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            SETTINGS_FILE.write_text(json.dumps(settings, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _on_resize(self, event):
+        if event.widget is self.root:
+            if self.rescale_pending is not None:
+                self.root.after_cancel(self.rescale_pending)
+            self.rescale_pending = self.root.after(120, self._rescale)
+
+    def _rescale(self):
+        """Grow or shrink text, buttons and checkboxes with the window."""
+        self.rescale_pending = None
+        width, height = self.root.winfo_width(), self.root.winfo_height()
+        scale = min(width / self.base_size[0], height / self.base_size[1])
+        scale = round(min(max(scale, SCALE_LIMITS[0]), SCALE_LIMITS[1]), 2)
+        if abs(scale - self.scale) < 0.04:
+            return
+        self.scale = scale
+        for name, font in self.fonts.items():
+            size = self.font_sizes[name]
+            font.configure(size=int(round(size * scale)) or (1 if size > 0 else -1))
+        padding = max(2, int(round(6 * scale)))
+        self.style.configure("TButton", padding=padding)
+        self.style.configure("Accent.TButton", padding=padding)
+        self.style.configure("TCheckbutton", indicatorsize=max(8, int(round(11 * scale))))
+        self.style.configure("TCombobox", arrowsize=max(10, int(round(13 * scale))), padding=max(1, int(round(2 * scale))))
+        for label in self.wrapped:
+            label.configure(wraplength=int(WRAP_LENGTH * scale))
 
     def _combo(self, parent, label, values, column):
         ttk.Label(parent, text=label, style="Muted.TLabel").grid(row=0, column=column, sticky="w", padx=(0 if column == 0 else 10, 0))
@@ -172,17 +254,25 @@ class App:
 
     # ---- updates ------------------------------------------------------------
 
-    def _check_update(self):
+    def check_for_updates(self, manual=True):
+        if manual:
+            self.check_button.configure(state="disabled", text="Checking...")
+        threading.Thread(target=self._check_update, args=(manual,), daemon=True).start()
+        if not manual:
+            self.root.after(UPDATE_CHECK_MS, self.check_for_updates, False)
+
+    def _check_update(self, manual):
         try:
-            self.events.put(("update", updater.check()))
+            self.events.put(("update", (updater.check(), manual)))
         except updater.UpdateError as error:
+            self.events.put(("update", (None, manual)))
             self.events.put(("log", f"Update check failed: {error}"))
 
     def install_update(self):
         if not updater.can_install():
             self.write_log("Running from source: update with git pull instead.")
             return
-        self.stop.set()
+        self.resume_after_update = self.worker is not None and self.worker.is_alive()
         self.update_button.configure(state="disabled", text="Downloading 0%")
         threading.Thread(target=self._download_update, daemon=True).start()
 
@@ -242,19 +332,26 @@ class App:
                 elif kind == "preview":
                     latest_preview = payload
                 elif kind == "update":
-                    self.update = payload
-                    if payload is None:
-                        self.write_log(f"Version {__version__} is up to date.")
-                    else:
-                        self.write_log(f"Version {payload['version']} is available.")
-                        self.update_button.configure(text=f"Update to {payload['version']} and restart")
+                    found, manual = payload
+                    self.check_button.configure(state="normal", text="Check for updates")
+                    if found is None:
+                        if manual or not self.update_checked:
+                            self.write_log(f"Version {__version__} is up to date.")
+                    elif self.update is None or found["version"] != self.update["version"]:
+                        self.write_log(f"Version {found['version']} is available.")
+                        self.update_button.configure(text=f"Install {found['version']} now")
                         self.update_button.grid()
+                    if found is not None:
+                        self.update = found
+                    self.update_checked = True
                 elif kind == "progress":
                     if payload is None:
-                        self.update_button.configure(state="normal", text=f"Update to {self.update['version']} and restart")
+                        self.update_button.configure(state="normal", text=f"Install {self.update['version']} now")
                     else:
                         self.update_button.configure(text=f"Downloading {payload:.0%}")
                 elif kind == "restart":
+                    # Relaunch on the new version with the same settings, still watching if it was.
+                    self._save_settings(resume=self.resume_after_update)
                     updater.restart()
                 elif kind == "stopped":
                     self.toggle.configure(text="Start", state="normal")
@@ -273,6 +370,7 @@ class App:
         self.root.after(100, self.drain)
 
     def close(self):
+        self._save_settings()
         self.stop.set()
         self.closing.set()
         for hwnd, _ in win.find_windows(STRATS_TITLE):

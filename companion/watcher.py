@@ -32,9 +32,10 @@ PREVIEW_SIZE = 360
 ORIENTATION_READS = 6          # consecutive upside-down minimap reads before the side is flipped
 ORIENTATION_TOLERANCE = 3.0
 TELEPORT_METRES = 25           # further than anyone moves between two reads: only a round-start respawn does it
-TELEPORT_SECONDS = 3
+TELEPORT_SECONDS = 3           # without the round count, a jump only counts between reads this close together
+RESPAWN_WINDOW_SECONDS = 60    # after the round count goes up, look this long for the respawn, however far apart the reads
 SPAWN_METRES = 20              # how close to a team's spawn label a respawn has to land
-SPAWN_READS = 3                # reads in a row at that spawn afterwards (the buy phase keeps you there)
+SPAWN_READS = 3                # reads at that spawn, the jump included (the buy phase keeps you there)
 FOLLOWS_SIDE_KEY = "minimap_follows_side"
 
 
@@ -71,8 +72,11 @@ class SideTracker:
         self.follows_side = _minimap_follows_side()
         self.last_position = None
         self.spawn_candidate = None
+        self.respawn_due = None      # (round, time the round count went up) while a respawn is expected
+        self.respawn_news = []
 
     def update_match(self, team, rounds, half_length):
+        seen_before = self.team is not None
         if self.starts_attacking is None:
             self.starts_attacking = team == ATTACKERS_FIRST
         elif self.team is not None and team != self.team:
@@ -82,6 +86,8 @@ class SideTracker:
         self.team = team
         self.half_length = half_length
         if rounds != self.rounds:
+            if seen_before and rounds > self.rounds:
+                self.respawn_due = (rounds + 1, time.time())
             self.rounds = rounds
             self.angles.clear()
 
@@ -125,32 +131,47 @@ class SideTracker:
 
         Only the jump into a spawn counts, never where the player stands later
         in the round: a move of TELEPORT_METRES between two reads can only be the
-        respawn, and the buy phase then keeps the player at that spawn.
+        respawn, and the buy phase then keeps the player at that spawn. With the
+        round count known, the jump may span any gap between reads in the minute
+        after the count goes up (the reads pause while Strats.gg is being driven);
+        without it, only reads TELEPORT_SECONDS apart count.
         """
+        due = self.respawn_due
+        if due is not None and time.time() - due[1] > RESPAWN_WINDOW_SECONDS:
+            self.respawn_due = None
+            self.respawn_news.append(f"Round {due[0]}: no respawn seen on the minimap.")
         player = reading.player
         if player is None:
             return None
         previous, self.last_position = self.last_position, (player, now)
         spawns = {side: map_shape.spawn(map_item, assumed, of=side) for side in ("attack", "defense")}
+
+        def at_spawn(side):
+            return spawns[side] is not None and geometry.metres(map_item, player, spawns[side]) <= SPAWN_METRES
+
         if self.spawn_candidate is not None:
             side, count = self.spawn_candidate
-            if spawns[side] is None or geometry.metres(map_item, player, spawns[side]) > SPAWN_METRES:
+            if not at_spawn(side):
                 self.spawn_candidate = None
             elif count + 1 >= SPAWN_READS:
                 self.spawn_candidate = None
+                if self.respawn_due is not None:
+                    self.respawn_news.append(f"Round {self.respawn_due[0]}: you respawned in the {side} spawn.")
+                    self.respawn_due = None
                 self._learn_minimap(reading, side, assumed)
                 return side
             else:
                 self.spawn_candidate = (side, count + 1)
                 return None
-        if previous is None or now - previous[1] > TELEPORT_SECONDS:
+        if previous is None:
+            return None
+        if self.respawn_due is None and now - previous[1] > TELEPORT_SECONDS:
             return None
         if geometry.metres(map_item, previous[0], player) < TELEPORT_METRES:
             return None
-        nearest = min((side for side in spawns if spawns[side] is not None),
-                      key=lambda side: geometry.metres(map_item, player, spawns[side]), default=None)
-        if nearest is not None and geometry.metres(map_item, player, spawns[nearest]) <= SPAWN_METRES:
-            self.spawn_candidate = (nearest, 1)
+        landed = [side for side in spawns if at_spawn(side)]
+        if landed:
+            self.spawn_candidate = (min(landed, key=lambda side: geometry.metres(map_item, player, spawns[side])), 1)
         return None
 
     def _learn_minimap(self, reading, side, assumed):
@@ -400,6 +421,9 @@ class Watcher:
                 continue
             if self.side is None:
                 respawned = sides.observe_spawn(reading, now, map_item, target[2])
+                for news in sides.respawn_news:
+                    self.on_log(news)
+                sides.respawn_news.clear()
                 if respawned is not None and respawned != target[2]:
                     sides.set_side(respawned)
                     last_player = last_spike = None

@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 import requests
 
-from . import driver, geometry, map_shape, selector, strats_api, win
+from . import app_cache, driver, geometry, map_shape, selector, strats_api, win
 from .driver import DriverError, StratsWindow
 from .minimap import MinimapReader
 from .riot_local import ATTACKERS_FIRST, DEFAULT_HALF_LENGTH, NotAvailable, RiotClient, sides_swapped
@@ -19,6 +19,8 @@ from .riot_local import ATTACKERS_FIRST, DEFAULT_HALF_LENGTH, NotAvailable, Riot
 MATCH_POLL_SECONDS = 5
 THOROUGH_CALIBRATION_SECONDS = 45
 DATA_RETRY_SECONDS = 60
+APP_LOAD_WAIT = 2.0         # seconds between looks at the app's cache after opening a map in it
+APP_LOAD_ATTEMPTS = 4
 STEADY_TOLERANCE = 2.0
 LOCK_METRES = 25        # once this close to the chosen lineup's standing spot, keep it for the round
 PREVIEW_SIZE = 360
@@ -168,6 +170,20 @@ class Watcher:
         scale = PREVIEW_SIZE / max(roi.shape[:2])
         self.on_preview(cv2.resize(roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA))
 
+    def _load_through_app(self, window, maps, agents, map_item, agent_item, side):
+        """Open this map, agent and side in Strats.gg, which loads its lineups, and read them from the app's cache."""
+        self.on_log(f"No saved lineups for {map_item['name']} / {agent_item['name']} / {side}; loading them in Strats.gg.")
+        try:
+            window.show_map(maps, agents, map_item, agent_item, side, None)
+        except DriverError as error:
+            self.on_log(f"Strats.gg: {error}")
+        for _ in range(APP_LOAD_ATTEMPTS):
+            time.sleep(APP_LOAD_WAIT)
+            app_cache.harvest()
+            if strats_api.lineups_path(map_item["id"], agent_item["id"], side).exists():
+                return strats_api.lineups(map_item["id"], agent_item["id"], side)
+        raise strats_api.Unavailable("Strats.gg did not load them either")
+
     def run(self, stop):
         maps, agents = strats_api.maps(), strats_api.agents()
         manual = bool(self.map_name and self.agent_name)
@@ -226,7 +242,12 @@ class Watcher:
                 if wanted == refused and time.time() < retry_at:
                     continue
                 try:
-                    found = strats_api.lineups(map_item["id"], agent_item["id"], wanted[2])
+                    try:
+                        found = strats_api.lineups(map_item["id"], agent_item["id"], wanted[2])
+                    except strats_api.Unavailable:
+                        if not self.drive or wanted == refused:
+                            raise
+                        found = self._load_through_app(window, maps, agents, map_item, agent_item, wanted[2])
                     silhouette = map_shape.silhouette(map_item, wanted[2])
                 except (strats_api.Unavailable, requests.RequestException) as error:
                     if wanted != refused:

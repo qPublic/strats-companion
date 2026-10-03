@@ -43,15 +43,23 @@ def _cached(name, fetch):
     try:
         data = fetch()
     except (requests.RequestException, ValueError) as error:
-        # Strats.gg sometimes puts a browser check in front of its API; an old copy still works.
+        # Strats.gg sometimes puts a browser check in front of its API. The Strats.gg app may
+        # have loaded the same data itself; failing that, an old copy still works.
+        from . import app_cache
+
+        app_cache.harvest()
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
         status = getattr(getattr(error, "response", None), "status_code", None)
         reason = f"HTTP {status}" if status else type(error).__name__
         raise Unavailable(f"Strats.gg is refusing data requests right now ({reason}) and no saved copy exists") from error
+    save(path, data)
+    return data
+
+
+def save(path, data):
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data), encoding="utf-8")
-    return data
 
 
 def maps():

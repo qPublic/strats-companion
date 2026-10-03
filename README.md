@@ -53,6 +53,18 @@ From source, run `.venv\Scripts\python -m companion <command>` in this folder.
 
 Positions are `left,top` in percent of the Strats.gg map image for that side.
 
+## Where the lineup data comes from
+
+The companion asks Strats.gg's API for each map, agent and side and keeps a
+copy in `%LOCALAPPDATA%\StratsCompanion\cache`. While the window is open it
+also downloads every agent on every map in the background.
+
+Strats.gg sometimes refuses requests that don't come from a browser. Then the
+companion uses, in order: the lineups the Strats.gg app itself has loaded
+(read from the app's own cache on this PC), its saved copy, and finally, for a
+match it has no data for, it opens that map and agent in Strats.gg so the app
+loads them, and reads them from there.
+
 ## How a lineup is chosen
 
 A lineup qualifies when it lands within 3.5% of the map (about 5 m) of the

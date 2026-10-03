@@ -7,7 +7,7 @@ every combination is on disk.
 
 import requests
 
-from . import map_shape, strats_api
+from . import app_cache, map_shape, strats_api
 
 FIRST = ("Brimstone", "Viper", "Killjoy")   # saved before the other agents
 SIDES = ("attack", "defense")
@@ -42,6 +42,7 @@ def run(stop, on_log=print):
     while not stop.is_set():
         jobs, index = None, 0
         try:
+            app_cache.harvest()      # whatever the Strats.gg app has loaded since the last pass
             jobs = missing()
             for index, (description, fetch) in enumerate(jobs):
                 if stop.is_set():

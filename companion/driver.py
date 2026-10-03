@@ -231,7 +231,11 @@ class StratsWindow:
         return grid["origin"][0] + column * grid["pitch"][0], grid["origin"][1] + row * grid["pitch"][1]
 
     def show_map(self, maps, agents, map_item, agent_item, side, groups):
-        """Bring the window to the lineup map for this map, agent and side."""
+        """Bring the window to the lineup map for this map, agent and side.
+
+        Without `groups` (the lineup data is not known yet) the map and agent are
+        picked without checking the markers afterwards.
+        """
         self.attach()
         listed_maps = [item for item in maps if item.get("showInLineups", True)]
         listed_agents = [item for item in agents if item.get("showInLineups", True)]
@@ -263,7 +267,7 @@ class StratsWindow:
                     self.click(*SIDE_BUTTONS[side])
                     time.sleep(1.2)
                     continue
-                if self.shows(image, groups, agent_item["color"]):
+                if groups is not None and self.shows(image, groups, agent_item["color"]):
                     self.shown = wanted
                     return
                 if not map_done:

@@ -323,6 +323,11 @@ class MinimapReader:
             deaths.append(tuple(centers[index]))
         return deaths
 
+    def find_dropped_spike(self, frame, registration):
+        """Map position of a spike icon lying on the map although none is planted (test mode), or None."""
+        spike = self._find_spike(self._roi(frame), registration)
+        return None if spike is None else registration.to_map(spike)
+
     def read(self, frame):
         reading = Reading(planted=spike_planted(frame))
         reading.registration = self.register(frame)

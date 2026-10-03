@@ -144,6 +144,14 @@ captures, so the companion's own minimap reads never see it. It uses only the
 screen, never the game's memory. The aim screenshot comes from Strats.gg, or
 from the Strats.gg app's cache once the lineup has been opened there.
 
+## Test mode
+
+With "Test mode: a dropped spike counts as planted" ticked, a spike lying on
+the ground (seen on the minimap) is treated as planted there, so lineups can be
+practised without planting or starting new rounds. Drop the spike, walk away
+from it (a spike within 3 m of you is taken to be the one you carry), and the
+lineup opens. Pick it up and drop it somewhere else for the next one.
+
 ## How your side is decided
 
 With Side on Auto, the Riot client's team name gives a first guess, which can

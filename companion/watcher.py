@@ -5,15 +5,17 @@ reported through three callbacks so each front end can show it its own way.
 """
 
 import json
+import threading
 import time
 from collections import Counter, deque
 
 import cv2
+import mss
 import numpy as np
 import requests
 
 from . import app_cache, driver, geometry, map_shape, selector, strats_api, win
-from .aim import AimGuide
+from .aim import AimGuide, scenery_region
 from .driver import DriverError, StratsWindow
 from .minimap import MinimapReader
 from .paths import CALIBRATION_FILE
@@ -30,7 +32,8 @@ SAME_PLANT_METRES = 3    # spikes this close together count as the same plant
 LOCK_METRES = 25        # once this close to the chosen lineup's standing spot, keep it for the round
 PREVIEW_SIZE = 360
 IN_POSITION_METRES = 2.0  # this close to the standing spot, the aim guide starts matching the screen
-FAST_INTERVAL = 0.25      # seconds between reads while aiming, so the reticle keeps up with the camera
+TEST_SPIKE_CLEARANCE = 3  # test mode: a spike this close to the player is still theirs, not dropped
+AIM_PERIOD = 1 / 30      # the aim reticle follows the camera this often while on the spot
 AIM_IMAGE_RETRY = 5.0
 
 
@@ -231,6 +234,31 @@ class Threats:
         return [position for position, seen in self.enemies + self.deaths if now - seen <= THREAT_SECONDS]
 
 
+class AimTracker(threading.Thread):
+    """Matches the screen against a lineup's aim screenshot as often as it can while the player is on the spot.
+
+    Only the middle of the screen is captured, and the minimap is not read, so the
+    reticle keeps up with the camera; the main loop goes on reading the minimap.
+    """
+
+    def __init__(self, lineup_id, matcher, publish, stop):
+        super().__init__(daemon=True)
+        self.lineup_id, self.matcher, self.publish = lineup_id, matcher, publish
+        self.stopped, self.watcher_stop = threading.Event(), stop
+
+    def run(self):
+        with mss.mss() as grabber:
+            monitor = grabber.monitors[1]
+            screen = (monitor["width"], monitor["height"])
+            left, top, width, height = scenery_region(*screen)
+            area = {"left": monitor["left"] + left, "top": monitor["top"] + top, "width": width, "height": height}
+            while not self.stopped.is_set() and not self.watcher_stop.is_set():
+                started = time.perf_counter()
+                image = np.asarray(grabber.grab(area))[:, :, :3]
+                self.publish(self.matcher.locate(image, (left, top), screen))
+                self.stopped.wait(max(0.0, AIM_PERIOD - (time.perf_counter() - started)))
+
+
 def frames(video, interval, stop):
     """Frames to analyse: the live primary screen, or a video file sampled every `interval` seconds.
 
@@ -256,16 +284,22 @@ def frames(video, interval, stop):
 
 class Watcher:
     def __init__(self, map_name=None, agent_name=None, side=None, drive=True, interval=1.0, video=None,
-                 on_log=print, on_state=None, on_preview=None, fullscreen=False, hide=False, on_guide=None):
+                 on_log=print, on_state=None, on_preview=None, fullscreen=False, hide=False, on_guide=None,
+                 test_mode=False):
         self.map_name, self.agent_name, self.side = map_name, agent_name, side
         self.drive, self.interval, self.video = drive, interval, video
         # Show the lineup video full size, and keep Strats.gg minimised while no lineup is open.
         self.fullscreen, self.hide = fullscreen, hide
         # Draws where to stand and aim over the game (overlay.py); None turns the guide off.
         self.on_guide = on_guide
-        self.fast = False
+        # Practice without planting: a spike dropped on the ground is treated as planted there.
+        self.test_mode = test_mode
         self.aim_guides = {}        # lineup id -> (AimGuide, picture) or (None, time of the last try)
         self.guide_shown = False
+        self.guide = None           # the latest minimap part of the guide, which the aim tracker adds to
+        self.last_aim = None
+        self.tracker = None
+        self.stop_event = None
         self.on_log = on_log
         self.on_state = on_state or (lambda **changes: None)
         self.on_preview = on_preview
@@ -316,17 +350,37 @@ class Watcher:
         if player is not None:
             guide["metres"] = geometry.metres(map_item, player, spot)
             guide["in_position"] = guide["metres"] <= IN_POSITION_METRES
+        matcher = None
         if guide["in_position"]:
-            matcher, picture = self._aim_guide(lineup)
-            guide["picture"] = picture
-            if matcher is not None:
-                guide["aim"] = matcher.locate(frame)
-        self.fast = guide["in_position"]
+            matcher, guide["picture"] = self._aim_guide(lineup)
+        if matcher is None:
+            self._stop_tracker()
+        elif self.video is not None:
+            self.last_aim = matcher.locate(frame)
+        elif self.tracker is None or self.tracker.lineup_id != lineup["id"]:
+            self._stop_tracker()
+            self.tracker = AimTracker(lineup["id"], matcher, self._publish_aim, self.stop_event)
+            self.tracker.start()
+        guide["aim"] = self.last_aim
+        self.guide = guide
         self.on_guide(guide)
         self.guide_shown = True
 
+    def _publish_aim(self, aim):
+        """From the aim tracker's thread: redraw with the newest aim point."""
+        self.last_aim = aim
+        if self.guide is not None:
+            self.on_guide({**self.guide, "aim": aim})
+
+    def _stop_tracker(self):
+        if self.tracker is not None:
+            self.tracker.stopped.set()
+            self.tracker = None
+        self.last_aim = None
+
     def _hide_guide(self):
-        self.fast = False
+        self._stop_tracker()
+        self.guide = None
         if self.guide_shown:
             self.on_guide(None)
             self.guide_shown = False
@@ -377,8 +431,8 @@ class Watcher:
         self.on_log("Watching the minimap.")
         self.on_state(match="waiting for a match" if not manual else "", minimap="", spike="", player="", lineup="")
 
-        pace = self.interval if self.video is not None else (lambda: FAST_INTERVAL if self.fast else self.interval)
-        for index, frame in enumerate(frames(self.video, pace, stop)):
+        self.stop_event = stop
+        for index, frame in enumerate(frames(self.video, self.interval, stop)):
             now = time.time() if self.video is None else index * self.interval
             if manual:
                 wanted = (self.map_name, self.agent_name, self.side or sides.side())
@@ -461,14 +515,25 @@ class Watcher:
                 self.on_log(f"Minimap zoom calibrated ({reader.scale}, match score {score:.2f}).")
 
             reading = reader.read(frame)
+            if self.test_mode and not reading.planted and reading.registration is not None:
+                dropped = reader.find_dropped_spike(frame, reading.registration)
+                # A spike right on top of the player is being carried, or was only just dropped.
+                if dropped is not None and reading.player is not None and \
+                        geometry.metres(map_item, dropped, reading.player) <= TEST_SPIKE_CLEARANCE:
+                    dropped = None
+                if dropped is not None:
+                    reading.planted, reading.spike = True, dropped
             if self.on_preview is not None:
                 self._preview(reader, frame, reading, contours)
             # Leave the lineup once the spike is defused or explodes, or the next round starts, so
             # Strats.gg is back on the map and the next lineup is a single click away.
             if opened is not None:
                 unplanted = 0 if reading.planted else unplanted + 1
+                moved = (self.test_mode and reading.spike is not None
+                         and geometry.metres(map_item, reading.spike, opened_spike) > SAME_PLANT_METRES)
                 over = ("a new round started" if sides.rounds != opened_round
-                        else "the spike is gone" if unplanted >= SPIKE_GONE_READS else None)
+                        else "the spike is gone" if unplanted >= SPIKE_GONE_READS
+                        else "the spike was moved" if moved else None)
                 if over:
                     if self.on_guide is not None:
                         self._hide_guide()

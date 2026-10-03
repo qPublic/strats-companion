@@ -33,6 +33,7 @@ MIN_WINDOW_WIDTH = 1000        # the Strats.gg window is a fixed 1748 px wide on
 
 NAV_LINEUPS = (624, 73)
 VIDEO = (660, 450)            # middle of the lineup page's video
+DETAILS = (1500, 470)         # the lineup's description, beside the video: plain text, safe to release a click on
 VIDEO_AREA = (50, 150, 1290, 800)
 BACK_BUTTON = (81, 128)
 CHANGE_MAP = (262, 313)
@@ -176,11 +177,18 @@ class StratsWindow:
     def fullscreen_video(self):
         """Make the open lineup's video fill the Strats.gg window, still playing.
 
-        The player toggles full screen with F once it has keyboard focus. Clicking
-        the video gives it focus but also pauses it, so K starts it again.
+        The player toggles full screen with F once it has keyboard focus. Pressing
+        the mouse on the video gives it focus; releasing over the description
+        instead of the video keeps that from counting as a click, which would pause it.
         """
-        self.click(*VIDEO)
-        time.sleep(0.4)
+        self.move(*VIDEO)
+        time.sleep(0.05)
+        self._post(WM_LBUTTONDOWN, MK_LBUTTON, *VIDEO)
+        time.sleep(0.05)
+        self._post(WM_MOUSEMOVE, MK_LBUTTON, *DETAILS)
+        time.sleep(0.05)
+        self._post(WM_LBUTTONUP, 0, *DETAILS)
+        time.sleep(0.2)
         self.key(ord("F"), "f")
         time.sleep(0.8)
         self.fullscreen = self.state(self.capture()) != LINEUP_PAGE

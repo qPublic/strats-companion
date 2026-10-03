@@ -13,6 +13,7 @@ import numpy as np
 import requests
 
 from . import app_cache, driver, geometry, map_shape, selector, strats_api, win
+from .aim import AimGuide
 from .driver import DriverError, StratsWindow
 from .minimap import MinimapReader
 from .paths import CALIBRATION_FILE
@@ -28,6 +29,9 @@ SPIKE_GONE_READS = 3     # reads in a row without the planted indicator before t
 SAME_PLANT_METRES = 3    # spikes this close together count as the same plant
 LOCK_METRES = 25        # once this close to the chosen lineup's standing spot, keep it for the round
 PREVIEW_SIZE = 360
+IN_POSITION_METRES = 2.0  # this close to the standing spot, the aim guide starts matching the screen
+FAST_INTERVAL = 0.25      # seconds between reads while aiming, so the reticle keeps up with the camera
+AIM_IMAGE_RETRY = 5.0
 
 
 ORIENTATION_READS = 6          # consecutive upside-down minimap reads before the side is flipped
@@ -228,12 +232,16 @@ class Threats:
 
 
 def frames(video, interval, stop):
-    """Frames to analyse: the live primary screen, or a video file sampled every `interval` seconds."""
+    """Frames to analyse: the live primary screen, or a video file sampled every `interval` seconds.
+
+    `interval` may be a function, asked again before every frame.
+    """
     if video is None:
         while not stop.is_set():
             started = time.time()
             yield win.capture_screen()
-            stop.wait(max(0.0, interval - (time.time() - started)))
+            wait = interval() if callable(interval) else interval
+            stop.wait(max(0.0, wait - (time.time() - started)))
         return
     source = cv2.VideoCapture(video)
     position = 0.0
@@ -248,11 +256,16 @@ def frames(video, interval, stop):
 
 class Watcher:
     def __init__(self, map_name=None, agent_name=None, side=None, drive=True, interval=1.0, video=None,
-                 on_log=print, on_state=None, on_preview=None, fullscreen=False, hide=False):
+                 on_log=print, on_state=None, on_preview=None, fullscreen=False, hide=False, on_guide=None):
         self.map_name, self.agent_name, self.side = map_name, agent_name, side
         self.drive, self.interval, self.video = drive, interval, video
         # Show the lineup video full size, and keep Strats.gg minimised while no lineup is open.
         self.fullscreen, self.hide = fullscreen, hide
+        # Draws where to stand and aim over the game (overlay.py); None turns the guide off.
+        self.on_guide = on_guide
+        self.fast = False
+        self.aim_guides = {}        # lineup id -> (AimGuide, picture) or (None, time of the last try)
+        self.guide_shown = False
         self.on_log = on_log
         self.on_state = on_state or (lambda **changes: None)
         self.on_preview = on_preview
@@ -275,6 +288,48 @@ class Watcher:
             roi = roi[max(0, y - half):y + half, max(0, x - half):x + half]
         scale = PREVIEW_SIZE / max(roi.shape[:2])
         self.on_preview(cv2.resize(roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA))
+
+    def _aim_guide(self, lineup):
+        """The aim matcher and screenshot for a lineup, or (None, None) while the screenshot is not to be had."""
+        known = self.aim_guides.get(lineup["id"])
+        if known is not None and known[0] is not None:
+            return known
+        if known is not None and time.time() - known[1] < AIM_IMAGE_RETRY:
+            return None, None
+        picture = strats_api.aim_image(lineup["id"])
+        if picture is None:
+            self.aim_guides[lineup["id"]] = (None, time.time())
+            return None, None
+        self.aim_guides[lineup["id"]] = (AimGuide(picture), picture)
+        return self.aim_guides[lineup["id"]]
+
+    def _show_guide(self, frame, reading, lineup, map_item, player):
+        """Tell the overlay where the standing spot is on the minimap and, once there, where to aim."""
+        registration = reading.registration
+        spot = geometry.standing_spot(lineup)
+        guide = {"title": lineup["title"], "metres": None, "in_position": False}
+        if registration is not None:
+            guide["stand"] = tuple(float(v) for v in registration.to_screen(spot))
+            landing = geometry.landing_point(lineup)
+            if landing is not None:
+                guide["land"] = tuple(float(v) for v in registration.to_screen(landing))
+        if player is not None:
+            guide["metres"] = geometry.metres(map_item, player, spot)
+            guide["in_position"] = guide["metres"] <= IN_POSITION_METRES
+        if guide["in_position"]:
+            matcher, picture = self._aim_guide(lineup)
+            guide["picture"] = picture
+            if matcher is not None:
+                guide["aim"] = matcher.locate(frame)
+        self.fast = guide["in_position"]
+        self.on_guide(guide)
+        self.guide_shown = True
+
+    def _hide_guide(self):
+        self.fast = False
+        if self.guide_shown:
+            self.on_guide(None)
+            self.guide_shown = False
 
     def _park(self, window, maps, agents, map_item, agent_item, side, groups):
         """Leave Strats.gg on the lineup map, so only the lineup click is left when the spike goes down."""
@@ -322,7 +377,8 @@ class Watcher:
         self.on_log("Watching the minimap.")
         self.on_state(match="waiting for a match" if not manual else "", minimap="", spike="", player="", lineup="")
 
-        for index, frame in enumerate(frames(self.video, self.interval, stop)):
+        pace = self.interval if self.video is not None else (lambda: FAST_INTERVAL if self.fast else self.interval)
+        for index, frame in enumerate(frames(self.video, pace, stop)):
             now = time.time() if self.video is None else index * self.interval
             if manual:
                 wanted = (self.map_name, self.agent_name, self.side or sides.side())
@@ -414,6 +470,8 @@ class Watcher:
                 over = ("a new round started" if sides.rounds != opened_round
                         else "the spike is gone" if unplanted >= SPIKE_GONE_READS else None)
                 if over:
+                    if self.on_guide is not None:
+                        self._hide_guide()
                     used_lineups.append((opened_spike, opened["id"]))
                     opened = pending = last_spike = None
                     locked = False
@@ -445,6 +503,11 @@ class Watcher:
                     continue
             if reading.player is not None:
                 last_player = reading.player
+            if self.on_guide is not None:
+                if opened is not None:
+                    self._show_guide(frame, reading, opened, map_item, reading.player or last_player)
+                else:
+                    self._hide_guide()
             # Markers from an earlier round mean nothing: start again when the round count moves or the spike goes.
             if sides.rounds != threat_round or (was_planted and not reading.planted):
                 threats.clear()

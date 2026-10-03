@@ -15,6 +15,7 @@ import cv2
 from . import __version__, prefetch, strats_api, updater, win
 from .paths import CAPTURE_DIR, DATA_DIR
 from .driver import WINDOW_TITLE as STRATS_TITLE
+from .overlay import Overlay
 from .watcher import PREVIEW_SIZE, Watcher
 
 AUTO = "Auto"
@@ -81,6 +82,9 @@ class App:
         self.hide_strats = tk.BooleanVar(value=True)
         ttk.Checkbutton(pins, text="Full-screen the lineup video", variable=self.fullscreen, command=self.apply_options).grid(row=0, column=2, padx=(18, 0))
         ttk.Checkbutton(pins, text="Minimise Strats.gg between lineups", variable=self.hide_strats, command=self.apply_options).grid(row=0, column=3, padx=(18, 0))
+        self.show_guide = tk.BooleanVar(value=True)
+        ttk.Checkbutton(pins, text="Show in-game guide", variable=self.show_guide, command=self.apply_options).grid(row=0, column=4, padx=(18, 0))
+        self.overlay = Overlay(root)
         self.toggle = ttk.Button(controls, text="Start", style="Accent.TButton", command=self.toggle_watching, width=10)
         self.toggle.grid(row=1, column=4, padx=(14, 0))
 
@@ -147,7 +151,7 @@ class App:
         return {
             "map": self.map_choice, "agent": self.agent_choice, "side": self.side_choice,
             "drive": self.drive, "pin_self": self.pin_self, "pin_strats": self.pin_strats,
-            "fullscreen": self.fullscreen, "hide_strats": self.hide_strats,
+            "fullscreen": self.fullscreen, "hide_strats": self.hide_strats, "show_guide": self.show_guide,
         }
 
     def _load_settings(self):
@@ -225,6 +229,7 @@ class App:
             drive=self.drive.get(),
             fullscreen=self.fullscreen.get(),
             hide=self.hide_strats.get(),
+            on_guide=lambda guide: self.events.put(("guide", guide)),
             on_log=lambda text: self.events.put(("log", text)),
             on_state=lambda **changes: self.events.put(("state", changes)),
             on_preview=lambda image: self.events.put(("preview", image)),
@@ -290,6 +295,8 @@ class App:
     def apply_options(self):
         if self.watcher is not None:
             self.watcher.fullscreen, self.watcher.hide = self.fullscreen.get(), self.hide_strats.get()
+        if not self.show_guide.get():
+            self.overlay.show(None)
 
     def apply_pins(self):
         self.root.attributes("-topmost", self.pin_self.get())
@@ -331,6 +338,8 @@ class App:
                         self.state[key].set(value)
                 elif kind == "preview":
                     latest_preview = payload
+                elif kind == "guide":
+                    self.overlay.show(payload if self.show_guide.get() else None)
                 elif kind == "update":
                     found, manual = payload
                     self.check_button.configure(state="normal", text="Check for updates")
@@ -354,6 +363,7 @@ class App:
                     self._save_settings(resume=self.resume_after_update)
                     updater.restart()
                 elif kind == "stopped":
+                    self.overlay.show(None)
                     self.toggle.configure(text="Start", state="normal")
                     self.write_log("Stopped.")
         except queue.Empty:

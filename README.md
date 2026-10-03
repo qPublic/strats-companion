@@ -124,6 +124,26 @@ the map, so the next lineup is a single click away.
 - Not yet confirmed on a live game: a full plant-to-lineup run, and any map
   other than Ascent.
 
+## In-game guide
+
+With "Show in-game guide" ticked, the chosen lineup is drawn over the game
+(Valorant must run in Windowed Fullscreen):
+
+- **Where to stand**, on the minimap: a ring on the standing spot, a dashed
+  line to where it lands, and the distance, which turns to "In position"
+  within 2 m.
+- **Where to aim**, once in position: the lineup's aim screenshot is matched
+  against the screen. Standing on the spot, the two views differ only by how
+  the camera is turned (the field of view is fixed), so the match gives that
+  rotation, and a reticle is drawn on the aim point. When the aim point is off
+  screen, an arrow at the edge says which way and how far to turn. If the
+  scenery cannot be matched, the screenshot itself is shown on the right.
+
+The drawing ignores the mouse, never takes focus, and is kept out of screen
+captures, so the companion's own minimap reads never see it. It uses only the
+screen, never the game's memory. The aim screenshot comes from Strats.gg, or
+from the Strats.gg app's cache once the lineup has been opened there.
+
 ## How your side is decided
 
 With Side on Auto, the Riot client's team name gives a first guess, which can

@@ -22,6 +22,7 @@ from . import devalue, strats_api
 
 CACHE_DATA = Path(os.environ.get("APPDATA", "")) / "Strats.gg" / "Cache" / "Cache_Data"
 API_PREFIX = "https://strats.gg/api/trpc/"
+CDN_RESIZE = "/cdn-cgi/image/"     # thumbnails, resized on the way
 BLOCK_FILE_HEADER = 8192
 ENTRY_SIZE = 256
 BLOCK_SIZES = {2: 256, 3: 1024, 4: 4096}
@@ -58,8 +59,8 @@ def _read(address, size):
         return file.read(size)
 
 
-def _entries():
-    """(url, unix time stored, headers, body) for every cached Strats.gg API response."""
+def _cached(wanted):
+    """(key, unix time stored, headers, body) for every cached response whose key contains `wanted`."""
     with _open(CACHE_DATA / "data_1") as file:
         entries = file.read()
     for offset in range(BLOCK_FILE_HEADER, len(entries) - ENTRY_SIZE + 1, ENTRY_SIZE):
@@ -70,17 +71,44 @@ def _entries():
         try:
             # A key up to about 1 KB is stored inline, running on into the entry's following blocks.
             key = _read(long_key, key_length) if long_key else entries[offset + 96:offset + 96 + key_length]
-            if API_PREFIX.encode() not in key:
+            if wanted.encode() not in key:
                 continue
             sizes = struct.unpack_from("<4i", entry, 40)
             addresses = struct.unpack_from("<4I", entry, 56)
             headers, body = _read(addresses[0], sizes[0]), _read(addresses[1], sizes[1])
         except OSError:
             continue
-        if not body:
-            continue
-        key = key.decode("latin-1")
-        yield key[key.rindex(API_PREFIX):], created / 1e6 - WINDOWS_EPOCH_OFFSET, headers, body
+        if body:
+            yield key.decode("latin-1"), created / 1e6 - WINDOWS_EPOCH_OFFSET, headers, body
+
+
+def _entries():
+    """(url, unix time stored, headers, body) for every cached Strats.gg API response."""
+    for key, stored, headers, body in _cached(API_PREFIX):
+        yield key[key.rindex(API_PREFIX):], stored, headers, body
+
+
+def file(cdn_key):
+    """A file from cdn.strats.gg (by its key, e.g. an aim screenshot) as the app received it, or None.
+
+    The full-size copy is preferred over the thumbnails the app also loads.
+    """
+    if not (CACHE_DATA / "data_1").exists():
+        return None
+    try:
+        found = [
+            (CDN_RESIZE not in key, stored, headers, body)
+            for key, stored, headers, body in _cached(cdn_key) if key.endswith(cdn_key)
+        ]
+    except OSError:
+        return None
+    if not found:
+        return None
+    _, _, headers, body = max(found, key=lambda item: (item[0], item[1]))
+    try:
+        return _decode(headers, body)
+    except (ValueError, zlib.error):
+        return None
 
 
 def _decode(headers, body):
@@ -122,6 +150,8 @@ def harvest():
         for procedure, payload, result in results:
             if procedure == "valorant.lineups.all" and isinstance(payload, dict):
                 path = strats_api.lineups_path(payload["mapId"], payload["agentId"], payload["side"])
+            elif procedure == "valorant.lineups.byId" and isinstance(result, dict) and "id" in result:
+                path = strats_api.detail_path(result["id"])
             elif procedure in SAVED_NAMES:
                 path = strats_api.CACHE_DIR / f"{SAVED_NAMES[procedure]}.json"
             else:

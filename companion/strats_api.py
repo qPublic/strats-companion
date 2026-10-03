@@ -9,12 +9,15 @@ import json
 import re
 import time
 
+import cv2
+import numpy as np
 import requests
 
 from . import devalue
 from .paths import CACHE_DIR
 
 API_URL = "https://strats.gg/api/trpc"
+CDN_URL = "https://cdn.strats.gg"
 CACHE_TTL = 6 * 60 * 60
 
 
@@ -73,6 +76,45 @@ def agents():
 def lineups(map_id, agent_id, side):
     payload = {"agentId": agent_id, "mapId": map_id, "side": side, "tag": "all", "alignment": "all"}
     return _cached(lineups_path(map_id, agent_id, side).stem, lambda: _query("valorant.lineups.all", payload))
+
+
+def detail_path(lineup_id):
+    return CACHE_DIR / f"lineup_{lineup_id}.json"
+
+
+def lineup_detail(lineup_id):
+    """Everything about one lineup, including `imageKey`, its aim screenshot."""
+    return _cached(detail_path(lineup_id).stem, lambda: _query("valorant.lineups.byId", {"id": lineup_id}))
+
+
+def aim_image(lineup_id):
+    """The lineup's aim screenshot (BGR), or None when it has none or it cannot be had.
+
+    Fetched from cdn.strats.gg, or read from the Strats.gg app's cache: opening
+    the lineup in the app loads the full-size picture.
+    """
+    path = CACHE_DIR / "images" / f"{lineup_id}.img"
+    if not path.exists():
+        try:
+            key = lineup_detail(lineup_id).get("imageKey")
+        except (Unavailable, requests.RequestException):
+            return None
+        if not key:
+            return None
+        try:
+            response = requests.get(f"{CDN_URL}/{key}", timeout=20)
+            response.raise_for_status()
+            content = response.content
+        except requests.RequestException:
+            from . import app_cache
+
+            content = app_cache.file(key)
+        if not content:
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    image = cv2.imdecode(np.frombuffer(path.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+    return image
 
 
 def lineups_path(map_id, agent_id, side):

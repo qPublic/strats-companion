@@ -1,4 +1,4 @@
-"""Reads the planted spike and the player's position off the in-game minimap.
+"""Reads the planted spike, the player, spotted enemies and teammate deaths off the in-game minimap.
 
 The minimap is matched against the map's reference silhouette at any
 rotation, which gives a screen-to-map transform; icon positions found on
@@ -9,7 +9,7 @@ Tuned on 1080p match footage. Sizes scale with the calibrated minimap zoom.
 
 import json
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -30,6 +30,10 @@ LINE_THRESHOLD = 18
 ICON_RADIUS = 27.5             # player icon radius in map view units
 MIN_WHITE_RING = 0.35
 MAX_TEAL_RING = 0.15          # teammates' icons have a teal ring
+MIN_RED_RING = 0.35           # spotted enemies' icons have a red ring
+# Dead teammates are marked with a blue X (dead enemies with a red one, which is ignored).
+DEATH_SIZE = (0.3, 1.3)       # X width and height as a fraction of an icon's diameter
+MAX_DEATH_FILL = 0.8          # an X covers part of its box; a solid blob covers nearly all of it
 SPIKE_AREA = (0.0001, 0.0015)  # blob area as a fraction of the on-screen map square
 # Spike indicator that replaces the round timer once the spike is planted,
 # as (left, top, right, bottom) fractions of the frame.
@@ -63,6 +67,8 @@ class Reading:
     planted: bool = False
     spike: tuple = None
     player: tuple = None
+    enemies: list = field(default_factory=list)
+    deaths: list = field(default_factory=list)      # where teammates died
 
 
 def spike_planted(frame):
@@ -257,33 +263,54 @@ class MinimapReader:
                 best = (area, centers[index])
         return None if best is None else tuple(best[1])
 
-    def _find_player(self, roi, registration):
+    def _find_icons(self, roi, registration):
+        """Screen positions of the player's own icon (or None) and of spotted enemies' icons."""
         radius = ICON_RADIUS * registration.scale
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         white = (hsv[:, :, 1] < 50) & (hsv[:, :, 2] > 205)
         teal = cv2.inRange(hsv, (70, 70, 120), (100, 255, 255)) > 0
+        red = (cv2.inRange(hsv, (0, 120, 120), (8, 255, 255)) | cv2.inRange(hsv, (170, 120, 120), (180, 255, 255))) > 0
         gray = cv2.GaussianBlur(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), (0, 0), 1.0)
         circles = cv2.HoughCircles(
             gray, cv2.HOUGH_GRADIENT, dp=1, minDist=radius, param1=120, param2=14,
             minRadius=max(3, int(radius * 0.75)), maxRadius=int(np.ceil(radius * 1.3)),
         )
         if circles is None:
-            return None
+            return None, []
         height, width = white.shape
         angles = np.linspace(0, 2 * np.pi, 48, endpoint=False)
-        best = None
+        player, enemies = None, []
         for center_x, center_y, found_radius in circles[0]:
-            ring = teammate = 0.0
+            ring = teammate = enemy = 0.0
             for ring_radius in (found_radius - 1, found_radius, found_radius + 1):
                 xs = np.clip((center_x + ring_radius * np.cos(angles)).astype(int), 0, width - 1)
                 ys = np.clip((center_y + ring_radius * np.sin(angles)).astype(int), 0, height - 1)
                 ring = max(ring, float(white[ys, xs].mean()))
                 teammate = max(teammate, float(teal[ys, xs].mean()))
-            if ring < MIN_WHITE_RING or teammate > MAX_TEAL_RING:
+                enemy = max(enemy, float(red[ys, xs].mean()))
+            center = (float(center_x), float(center_y))
+            if not self._on_map(registration, center, self.nearby):
                 continue
-            if self._on_map(registration, (center_x, center_y), self.nearby) and (best is None or ring > best[0]):
-                best = (ring, (float(center_x), float(center_y)))
-        return None if best is None else best[1]
+            if enemy >= MIN_RED_RING:
+                enemies.append(center)
+            elif ring >= MIN_WHITE_RING and teammate <= MAX_TEAL_RING and (player is None or ring > player[0]):
+                player = (ring, center)
+        return (None if player is None else player[1]), enemies
+
+    def _find_deaths(self, roi, registration):
+        diameter = 2 * ICON_RADIUS * registration.scale
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        blue = cv2.inRange(hsv, (100, 90, 120), (125, 255, 255))
+        count, _, stats, centers = cv2.connectedComponentsWithStats(cv2.dilate(blue, np.ones((2, 2), np.uint8)))
+        deaths = []
+        for index in range(1, count):
+            width, height, area = stats[index][cv2.CC_STAT_WIDTH], stats[index][cv2.CC_STAT_HEIGHT], stats[index][cv2.CC_STAT_AREA]
+            if not all(DEATH_SIZE[0] * diameter <= side <= DEATH_SIZE[1] * diameter for side in (width, height)):
+                continue
+            if area > MAX_DEATH_FILL * width * height or not self._on_map(registration, centers[index], self.inside):
+                continue
+            deaths.append(tuple(centers[index]))
+        return deaths
 
     def read(self, frame):
         reading = Reading(planted=spike_planted(frame))
@@ -291,9 +318,11 @@ class MinimapReader:
         if reading.registration is None:
             return reading
         roi = self._roi(frame)
-        player = self._find_player(roi, reading.registration)
+        player, enemies = self._find_icons(roi, reading.registration)
         if player is not None:
             reading.player = reading.registration.to_map(player)
+        reading.enemies = [reading.registration.to_map(enemy) for enemy in enemies]
+        reading.deaths = [reading.registration.to_map(death) for death in self._find_deaths(roi, reading.registration)]
         if reading.planted:
             spike = self._find_spike(roi, reading.registration)
             if spike is not None:

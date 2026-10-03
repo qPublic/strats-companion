@@ -81,6 +81,46 @@ class SideTracker:
         )
 
 
+THREAT_SECONDS = 10     # an enemy or a teammate's death this old says nothing about where enemies are now
+SAME_PLACE = 3.0        # map percent within which two sightings are the same marker
+
+
+class Threats:
+    """Recently spotted enemies and recent teammate deaths, in map coordinates."""
+
+    def __init__(self):
+        self.enemies = []   # [position, last seen]
+        self.deaths = []    # [position, first seen]; every death marker seen this round, so none counts twice
+
+    def clear(self):
+        self.enemies.clear()
+        self.deaths.clear()
+
+    @staticmethod
+    def _near(entries, position):
+        return next((entry for entry in entries if geometry.distance(entry[0], position) <= SAME_PLACE), None)
+
+    def update(self, reading, now):
+        """Record this read's markers; returns descriptions of the new ones."""
+        news = []
+        self.enemies = [entry for entry in self.enemies if now - entry[1] <= THREAT_SECONDS]
+        for enemy in reading.enemies:
+            known = self._near(self.enemies, enemy)
+            if known is None:
+                self.enemies.append([enemy, now])
+                news.append(f"Enemy spotted at {enemy[0]:.0f},{enemy[1]:.0f}.")
+            else:
+                known[:] = [enemy, now]
+        for death in reading.deaths:
+            if self._near(self.deaths, death) is None:
+                self.deaths.append([death, now])
+                news.append(f"Teammate died at {death[0]:.0f},{death[1]:.0f}.")
+        return news
+
+    def active(self, now):
+        return [position for position, seen in self.enemies + self.deaths if now - seen <= THREAT_SECONDS]
+
+
 def frames(video, interval, stop):
     """Frames to analyse: the live primary screen, or a video file sampled every `interval` seconds."""
     if video is None:
@@ -135,7 +175,10 @@ class Watcher:
         if self.drive:
             driver.launch(restart=True)
         window = StratsWindow()
-        target = reader = lineups = groups = map_item = agent_item = contours = spawn = None
+        target = reader = lineups = groups = map_item = agent_item = contours = None
+        threats = Threats()
+        threat_round = None
+        was_planted = False
         sides = SideTracker()
         last_match_check = last_thorough = 0.0
         last_spike = last_player = opened = pending = None
@@ -145,7 +188,8 @@ class Watcher:
         self.on_log("Watching the minimap.")
         self.on_state(match="waiting for a match" if not manual else "", minimap="", spike="", player="", lineup="")
 
-        for frame in frames(self.video, self.interval, stop):
+        for index, frame in enumerate(frames(self.video, self.interval, stop)):
+            now = time.time() if self.video is None else index * self.interval
             if manual:
                 wanted = (self.map_name, self.agent_name, self.side or sides.side())
             elif time.time() - last_match_check >= MATCH_POLL_SECONDS:
@@ -194,7 +238,6 @@ class Watcher:
                 target = wanted
                 lineups = [item for item in found if item["status"] == "approved"]
                 groups = geometry.group_lineups(lineups)
-                spawn = map_shape.spawn(map_item, target[2])
                 contours, _ = cv2.findContours(silhouette, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
                 reader = MinimapReader(silhouette, frame.shape[0], MinimapReader.stored_scale(frame.shape))
                 opened = pending = last_spike = None
@@ -242,6 +285,13 @@ class Watcher:
                     continue
             if reading.player is not None:
                 last_player = reading.player
+            # Markers from an earlier round mean nothing: start again when the round count moves or the spike goes.
+            if sides.rounds != threat_round or (was_planted and not reading.planted):
+                threats.clear()
+                threat_round = sides.rounds
+            was_planted = reading.planted
+            for news in threats.update(reading, now):
+                self.on_log(news)
             self.on_state(
                 minimap=f"found (match {reading.registration.score:.2f})",
                 player="not seen" if last_player is None else f"{last_player[0]:.0f}, {last_player[1]:.0f}",
@@ -271,7 +321,9 @@ class Watcher:
             last_spike = reading.spike
             if not steady:
                 continue
-            lineup = selector.choose(lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item), spawn)
+            lineup = selector.choose(
+                lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item), threats.active(now)
+            )
             if lineup is None:
                 self.on_state(lineup="none lands on the spike")
                 continue

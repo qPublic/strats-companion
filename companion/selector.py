@@ -6,6 +6,8 @@ from . import geometry
 SPIKE_RADIUS = 3.5
 # How far from the player a standing spot may be and still count as "not too far".
 MAX_WALK = 25.0
+# Standing spots this close to a recently spotted enemy or a teammate's death are avoided.
+DANGER_RADIUS = 10.0
 
 # Abilities that stop or punish a defuse. Lineups using one of these win over
 # anything else that happens to land near the spike (smokes, recon, traps).
@@ -20,39 +22,60 @@ def post_plant_ability_ids(agent):
     return {ability["id"] for ability in agent["abilities"] if ability["name"] in POST_PLANT_ABILITIES}
 
 
-def choose(lineups, spike, player=None, preferred_abilities=(), spawn=None, radius=SPIKE_RADIUS):
+def in_cone(spot, spike):
+    """Whether `spot` lies in the right-angle cone opening south (down the map image) from the spike.
+
+    Strats.gg draws each side's map with that side's spawn at the bottom, as a
+    fixed minimap does, so south is back towards your own team's side.
+    """
+    across, down = spot[0] - spike[0], spot[1] - spike[1]
+    return down > 0 and abs(across) <= down
+
+
+def choose(lineups, spike, player=None, preferred_abilities=(), threats=(), radius=SPIKE_RADIUS):
     """The best lineup landing within `radius` of the spike, or None when nothing lands there.
 
-    Lineups using a preferred ability are considered first. Among those, the
-    one thrown from closest to the team's `spawn` wins, as long as its standing
-    spot is within MAX_WALK of the player; if none is that close, the nearest
-    standing spot wins. Without a player position, closeness to spawn decides,
-    and without a spawn either, the landing closest to the spike.
+    Lineups using a preferred ability are considered first. Standing spots
+    within DANGER_RADIUS of a threat (a spotted enemy or a teammate's death) are
+    dropped; if every spot is that close, the one farthest from the threats
+    wins. Otherwise the standing spot closest to the spike inside the
+    south-facing cone wins, preferring spots within MAX_WALK of the player.
+    With nothing in the cone, the standing spot nearest the player wins (or,
+    without a player position, the one closest to the spike).
     """
     candidates = []
     for lineup in lineups:
         landing = geometry.landing_point(lineup)
         if landing is None:
             continue
-        miss = geometry.distance(landing, spike)
-        if miss <= radius:
-            candidates.append((lineup, miss))
-    preferred = [item for item in candidates if item[0]["abilityId"] in preferred_abilities]
+        if geometry.distance(landing, spike) <= radius:
+            candidates.append(lineup)
+    preferred = [lineup for lineup in candidates if lineup["abilityId"] in preferred_abilities]
     candidates = preferred or candidates
     if not candidates:
         return None
 
-    def standing(item):
-        return item[0]["left"], item[0]["top"]
+    def danger(lineup):
+        """Distance from the standing spot to the nearest threat."""
+        spot = geometry.standing_spot(lineup)
+        return min((geometry.distance(spot, threat) for threat in threats), default=float("inf"))
 
+    safe = [lineup for lineup in candidates if danger(lineup) > DANGER_RADIUS]
+    if not safe:
+        return max(candidates, key=danger)
+
+    def from_spike(lineup):
+        return geometry.distance(geometry.standing_spot(lineup), spike)
+
+    cone = [lineup for lineup in safe if in_cone(geometry.standing_spot(lineup), spike)]
+    if cone:
+        if player is not None:
+            reachable = [lineup for lineup in cone if geometry.distance(geometry.standing_spot(lineup), player) <= MAX_WALK]
+            cone = reachable or cone
+        return min(cone, key=from_spike)
     if player is not None:
-        reachable = [item for item in candidates if geometry.distance(standing(item), player) <= MAX_WALK]
-        if not reachable or spawn is None:
-            return min(candidates, key=lambda item: geometry.distance(standing(item), player))[0]
-        candidates = reachable
-    if spawn is not None:
-        return min(candidates, key=lambda item: geometry.distance(standing(item), spawn))[0]
-    return min(candidates, key=lambda item: item[1])[0]
+        return min(safe, key=lambda lineup: geometry.distance(geometry.standing_spot(lineup), player))
+    return min(safe, key=from_spike)
 
 
 def group_of(groups, lineup):

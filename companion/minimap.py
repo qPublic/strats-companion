@@ -23,6 +23,9 @@ MIN_CALIBRATION_SCORE = 0.16   # a wrong zoom scores under 0.15
 TEMPLATE_CACHE = {0.25: 400, 0.5: 160, 1.0: 40}   # outlines kept per resolution
 COARSE_ANGLE_STEP = 3
 FINE_ANGLE_STEP = 0.75
+FINEST_ANGLE_STEP = 0.25
+SNAP_DEGREES = 1.0             # a fit this close to a right angle is a fixed minimap...
+SNAP_SCORE_SLACK = 0.002       # ...when the exact right angle fits about as well
 TRACK_ANGLE_RANGE = 9
 CALIBRATION_SCALES = np.arange(0.22, 0.90, 0.02)   # screen pixels per map view unit
 DEFAULT_SCALE = 0.405          # zoom seen with default minimap settings at both 1080p and 1440p
@@ -30,6 +33,7 @@ LINE_THRESHOLD = 18
 ICON_RADIUS = 27.5             # player icon radius in map view units
 MIN_WHITE_RING = 0.35
 MIN_POINTER_PIXELS = 3        # the facing pointer on the player's icon, after thin lines are removed
+MIN_RING_COVER = 0.4           # share of a ring on white, less white inside it, for an icon's centre to be measured
 MAX_TEAL_RING = 0.15          # teammates' icons have a teal ring
 MIN_RED_RING = 0.35           # spotted enemies' icons have a red ring...
 MAX_RED_INSIDE = 0.35         # ...around a portrait, not a red fill...
@@ -103,6 +107,58 @@ def _pointer_angle(roi, center, radius):
     near = np.abs((angles - peak + 180) % 360 - 180) <= 22
     return float(np.degrees(np.arctan2(np.sin(np.radians(angles[near])).mean(),
                                        np.cos(np.radians(angles[near])).mean())))
+
+
+def _peak_offset(scores, location, axis):
+    """Sub-pixel offset of a correlation peak along one axis, from a parabola through it and its neighbours."""
+    x, y = location
+    if axis == 0:
+        if not 0 < x < scores.shape[1] - 1:
+            return 0.0
+        before, peak, after = scores[y, x - 1], scores[y, x], scores[y, x + 1]
+    else:
+        if not 0 < y < scores.shape[0] - 1:
+            return 0.0
+        before, peak, after = scores[y - 1, x], scores[y, x], scores[y + 1, x]
+    curve = before - 2 * peak + after
+    return 0.0 if curve >= 0 else float(np.clip(0.5 * (before - after) / curve, -0.5, 0.5))
+
+
+def _ring_centre(white, center, radius):
+    """Centre of the white ring around an icon to a fraction of a pixel, or None.
+
+    A thin ring is slid over the white pixels near the first guess (which can be
+    a few pixels out), at a few sizes; where most of the ring lies on white is
+    the centre. The facing pointer and the view cone touch the ring only on one
+    side, so they cannot pull it the way a plain circle fit can be pulled.
+    """
+    reach = int(radius * 1.9) + 3
+    x0, y0 = max(0, int(round(center[0])) - reach), max(0, int(round(center[1])) - reach)
+    patch = white[y0:int(round(center[1])) + reach + 1, x0:int(round(center[0])) + reach + 1].astype(np.float32)
+    best = None
+    for size in radius * np.arange(0.72, 1.1, 0.04):
+        half = int(np.ceil(size + 2))
+        ys, xs = np.mgrid[-half:half + 1, -half:half + 1]
+        distance = np.hypot(xs, ys)
+        ring = (np.abs(distance - size) <= 1.2).astype(np.float32)
+        # Inside the ring is the agent's portrait, not white: white there means the ring sits on the
+        # view cone or the pointer instead, and counts against.
+        inside = ((distance >= size * 0.35) & (distance <= size - 2.5)).astype(np.float32)
+        kernel = ring / ring.sum() - inside / inside.sum()
+        if patch.shape[0] < kernel.shape[0] or patch.shape[1] < kernel.shape[1]:
+            continue
+        scores = cv2.matchTemplate(patch, kernel, cv2.TM_CCORR)
+        _, peak, _, location = cv2.minMaxLoc(scores)
+        if best is None or peak > best[0]:
+            best = (peak, scores, location, half)
+    if best is None or best[0] < MIN_RING_COVER:
+        return None
+    peak, scores, location, half = best
+    cx = x0 + location[0] + half + _peak_offset(scores, location, 0)
+    cy = y0 + location[1] + half + _peak_offset(scores, location, 1)
+    if np.hypot(cx - center[0], cy - center[1]) > radius * 0.7:
+        return None
+    return float(cx), float(cy)
 
 
 def _x_shaped(blob):
@@ -254,10 +310,15 @@ class MinimapReader:
                 left, top = min(max(center_x - reach, 0), limit_x), min(max(center_y - reach, 0), limit_y)
                 right, bottom = min(max(center_x + reach, 0), limit_x), min(max(center_y + reach, 0), limit_y)
                 padded = padded[top:bottom + canvas, left:right + canvas]
-            _, peak, _, location = cv2.minMaxLoc(cv2.matchTemplate(padded, template, cv2.TM_CCORR))
+            scores = cv2.matchTemplate(padded, template, cv2.TM_CCORR)
+            _, peak, _, location = cv2.minMaxLoc(scores)
             score = peak / total - density
             if score > best.score:
-                center = ((location[0] + left - margin + canvas / 2) / down, (location[1] + top - margin + canvas / 2) / down)
+                x, y = float(location[0]), float(location[1])
+                if down == 1.0:
+                    x += _peak_offset(scores, location, 0)
+                    y += _peak_offset(scores, location, 1)
+                center = ((x + left - margin + canvas / 2) / down, (y + top - margin + canvas / 2) / down)
                 best = Registration(score, scale, float(angle) % 360, center)
         return best
 
@@ -265,7 +326,16 @@ class MinimapReader:
         """Sharpen a rough placement: half resolution first, then full resolution."""
         middle = self._search(lines, scale, np.arange(angle - spread, angle + spread + 0.01, 1.5), 0.5, center, 10)
         fine_angles = np.arange(middle.angle - 1.5, middle.angle + 1.51, FINE_ANGLE_STEP)
-        return self._search(lines, scale, fine_angles, 1.0, middle.center, 3)
+        fine = self._search(lines, scale, fine_angles, 1.0, middle.center, 3)
+        right_angle = round(fine.angle / 90) * 90 % 360
+        if abs((fine.angle - right_angle + 180) % 360 - 180) <= SNAP_DEGREES:
+            # A fixed minimap is drawn at exactly 0, 90, 180 or 270 degrees; measuring it in steps would
+            # only add error, which grows towards the minimap's edge.
+            snapped = self._search(lines, scale, (right_angle,), 1.0, fine.center, 2)
+            if snapped.score >= fine.score - SNAP_SCORE_SLACK:
+                return snapped
+        finest = np.arange(fine.angle - FINE_ANGLE_STEP, fine.angle + FINE_ANGLE_STEP + 0.01, FINEST_ANGLE_STEP)
+        return self._search(lines, scale, finest, 1.0, fine.center, 2)
 
     def _locate(self, lines, scale):
         """Placement of the map with no prior knowledge of its rotation."""
@@ -357,7 +427,13 @@ class MinimapReader:
                     enemies.append(center)
             elif ring >= MIN_WHITE_RING and teammate <= MAX_TEAL_RING and (player is None or ring > player[0]):
                 player = (ring, center)
-        return (None if player is None else player[1]), enemies
+        if player is None:
+            return None, enemies
+        local = (player[1][0] - offset[0], player[1][1] - offset[1])
+        fitted = _ring_centre(white, local, radius)
+        if fitted is not None:
+            return (fitted[0] + offset[0], fitted[1] + offset[1]), enemies
+        return player[1], enemies
 
     def _find_deaths(self, roi, registration):
         diameter = 2 * ICON_RADIUS * registration.scale

@@ -38,6 +38,8 @@ IN_POSITION_METRES = 2.0  # this close to the standing spot, the aim guide start
 # from the player's icon is that badge (or was only just dropped), not a spike lying on the ground.
 CARRIED_ICON_RADII = 3.0
 AIM_IMAGE_RETRY = 5.0
+SPOT_ATTEMPTS = 12          # tries at reading a lineup's standing spot from its screenshot...
+SPOT_RETRY_SECONDS = 3.0    # ...this far apart, while Strats.gg loads it
 
 
 ORIENTATION_READS = 6          # consecutive upside-down minimap reads before the side is flipped
@@ -341,10 +343,16 @@ class Watcher:
             self.true_spots[lineup["id"]] = None
 
             def read():
-                try:
-                    found = spot.true_spot(lineup, map_item)
-                except Exception:  # noqa: BLE001 - the dot still works
-                    found = None
+                found = None
+                # The screenshot may only arrive once Strats.gg has opened the lineup: keep trying a while.
+                for _ in range(SPOT_ATTEMPTS):
+                    try:
+                        found = spot.true_spot(lineup, map_item)
+                    except Exception:  # noqa: BLE001 - the dot still works
+                        found = None
+                    if found is not None or spot.known(lineup["id"]) or self.stop_event.is_set():
+                        break
+                    self.stop_event.wait(SPOT_RETRY_SECONDS)
                 self.true_spots[lineup["id"]] = found
                 if found is not None:
                     moved = geometry.metres(map_item, found, geometry.standing_spot(lineup))

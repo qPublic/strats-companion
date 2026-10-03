@@ -299,6 +299,7 @@ class StratsWindow:
         wanted = (map_item["id"], agent_item["id"])
         map_done = agent_done = self.shown == wanted
         retries = 0
+        escaped = False
 
         for _ in range(12):
             image = self.capture()
@@ -311,8 +312,12 @@ class StratsWindow:
             elif state == AGENT_DIALOG:
                 self.click(*self._grid_cell(AGENT_GRID, agent_index))
                 agent_done = True
-            elif state == OTHER and self.fullscreen:
+            elif state == OTHER and not escaped:
+                # Possibly a full-screen video, perhaps left by an earlier run that no longer knows it
+                # made it: Escape leaves full screen, and does no harm on any other page.
+                self.fullscreen = True
                 self.leave_fullscreen()
+                escaped = True
                 continue
             elif state == OTHER:
                 self.click(*NAV_LINEUPS)

@@ -15,6 +15,9 @@ The HUD, the minimap and the weapon differ between the two pictures and are left
 out of the matching.
 """
 
+import threading
+import time
+from collections import deque
 from dataclasses import dataclass
 
 import cv2
@@ -160,3 +163,181 @@ class AimGuide:
             point = (np.sign(x) * 1e6, np.sign(y) * 1e6)
         on_screen = z > 0 and 0 <= point[0] < screen[0] and 0 <= point[1] < screen[1]
         return Aim((float(point[0]), float(point[1])), bool(on_screen), yaw, pitch, int(best.sum()))
+
+
+# ---- following the aim point between full matches ---------------------------
+
+FOLLOW_PERIOD = 1 / 90          # the reticle follows the scenery this often
+MATCH_PERIOD = 1 / 12           # full matches, which correct any drift, this often
+PATCH = 72                      # side of the patch of scenery around the aim point that is followed (screen pixels)
+SEARCH = 150                    # how far that patch may move between two follows
+MIN_FOLLOW_SCORE = 0.6
+MIN_PATCH_CONTRAST = 6.0        # a featureless patch (sky, a flat wall) cannot be followed
+DRIFT_PIXELS = 1.5              # a full match disagreeing by more than this corrects the follower
+HISTORY_SECONDS = 1.0
+
+
+class _OneEuro:
+    """One-euro filter: steadies a still point without making a moving one lag."""
+
+    def __init__(self, min_cutoff=1.5, beta=0.06, derivative_cutoff=1.0):
+        self.min_cutoff, self.beta, self.derivative_cutoff = min_cutoff, beta, derivative_cutoff
+        self.value = self.speed = self.time = None
+
+    @staticmethod
+    def _alpha(cutoff, step):
+        tau = 1.0 / (2 * np.pi * cutoff)
+        return 1.0 / (1.0 + tau / step)
+
+    def __call__(self, value, now):
+        value = np.asarray(value, float)
+        if self.value is None or now <= self.time:
+            self.value, self.speed, self.time = value, np.zeros_like(value), now
+            return value
+        step = now - self.time
+        speed = (value - self.value) / step
+        self.speed = self.speed + self._alpha(self.derivative_cutoff, step) * (speed - self.speed)
+        cutoff = self.min_cutoff + self.beta * np.linalg.norm(self.speed)
+        self.value = self.value + self._alpha(cutoff, step) * (value - self.value)
+        self.time = now
+        return self.value
+
+    def reset(self):
+        self.value = None
+
+
+def mss_grabber():
+    """A grab(left, top, width, height) -> BGR function for the primary monitor, for one thread."""
+    import mss
+
+    grabber = mss.mss()
+    monitor = grabber.monitors[1]
+
+    def grab(left, top, width, height):
+        area = {"left": monitor["left"] + int(left), "top": monitor["top"] + int(top),
+                "width": int(width), "height": int(height)}
+        return np.asarray(grabber.grab(area))[:, :, :3]
+
+    return grab, (monitor["width"], monitor["height"])
+
+
+class Tracker:
+    """Keeps the aim point locked to the scenery while the player is on the spot.
+
+    Two loops: full matches against the aim screenshot (AimGuide.locate, tens of
+    milliseconds) find the aim point, and in between a small patch of scenery
+    around it is followed from frame to frame by template matching (about a
+    millisecond), so the reticle moves with the world as the camera turns. A
+    full match is compared with where the follower was when that match's picture
+    was taken, so a late result corrects drift without pulling the reticle back.
+    """
+
+    def __init__(self, matcher, publish, grabber=mss_grabber, also_stop=None):
+        self.matcher, self.publish, self.grabber = matcher, publish, grabber
+        self.stopped = threading.Event()
+        self.also_stop = also_stop or threading.Event()
+        self.lock = threading.Lock()
+        self.point = self.template = self.aim = None
+        self.history = deque()
+        self.filter = _OneEuro()
+
+    def start(self):
+        for loop in (self._match_loop, self._follow_loop):
+            threading.Thread(target=loop, daemon=True).start()
+
+    def stop(self):
+        self.stopped.set()
+
+    def _done(self):
+        return self.stopped.is_set() or self.also_stop.is_set()
+
+    def _send(self, aim):
+        if not self._done():
+            self.publish(aim)
+
+    def _point_at(self, moment):
+        """Where the follower had the aim point at `moment`, or None."""
+        if not self.history:
+            return None
+        when, point = min(self.history, key=lambda item: abs(item[0] - moment))
+        return point if abs(when - moment) <= 0.1 else None
+
+    def _match_loop(self):
+        grab, screen = self.grabber()
+        left, top, width, height = scenery_region(*screen)
+        while not self._done():
+            started = time.perf_counter()
+            image = grab(left, top, width, height)
+            aim = self.matcher.locate(image, (left, top), screen)
+            if aim is None or not aim.on_screen:
+                with self.lock:
+                    self.point = self.template = None
+                    self.history.clear()
+                self.filter.reset()
+                self._send(aim)
+            else:
+                template = self._patch(image, aim.point[0] - left, aim.point[1] - top)
+                with self.lock:
+                    seen = self._point_at(started)
+                    if self.point is None or seen is None:
+                        self.point = np.array(aim.point)
+                    else:
+                        drift = np.array(aim.point) - seen
+                        if np.linalg.norm(drift) > DRIFT_PIXELS:
+                            self.point = self.point + drift
+                    self.template, self.aim = template, aim
+                if template is None:
+                    self._send(aim)          # nothing to follow: show the full match as it is
+            self.stopped.wait(max(0.0, MATCH_PERIOD - (time.perf_counter() - started)))
+
+    @staticmethod
+    def _patch(image, x, y):
+        half = PATCH // 2
+        x, y = int(round(x)), int(round(y))
+        if not (half <= x < image.shape[1] - half and half <= y < image.shape[0] - half):
+            return None
+        patch = cv2.cvtColor(np.ascontiguousarray(image[y - half:y + half, x - half:x + half]), cv2.COLOR_BGR2GRAY)
+        return patch if float(patch.std()) >= MIN_PATCH_CONTRAST else None
+
+    def _follow_loop(self):
+        grab, screen = self.grabber()
+        while not self._done():
+            started = time.perf_counter()
+            with self.lock:
+                point, template, aim = self.point, self.template, self.aim
+            if point is not None and template is not None:
+                found = self._follow(grab, screen, point, template)
+                if found is not None:
+                    now = time.perf_counter()
+                    with self.lock:
+                        # A full match may have moved the point meanwhile; keep its correction.
+                        if self.point is point:
+                            self.point = found
+                        self.history.append((started, found))
+                        while self.history and now - self.history[0][0] > HISTORY_SECONDS:
+                            self.history.popleft()
+                    steady = self.filter(found, now)
+                    on_screen = 0 <= steady[0] < screen[0] and 0 <= steady[1] < screen[1]
+                    self._send(Aim((float(steady[0]), float(steady[1])), bool(on_screen), aim.yaw, aim.pitch, aim.matches))
+            self.stopped.wait(max(0.0, FOLLOW_PERIOD - (time.perf_counter() - started)))
+
+    @staticmethod
+    def _follow(grab, screen, point, template):
+        """Where the template is now, near `point`, to a fraction of a pixel; None when it is lost."""
+        half = PATCH // 2
+        size = 2 * (SEARCH + half)
+        left = int(max(0, min(screen[0] - size, point[0] - SEARCH - half)))
+        top = int(max(0, min(screen[1] - size, point[1] - SEARCH - half)))
+        window = cv2.cvtColor(np.ascontiguousarray(grab(left, top, size, size)), cv2.COLOR_BGR2GRAY)
+        scores = cv2.matchTemplate(window, template, cv2.TM_CCOEFF_NORMED)
+        _, best, _, (x, y) = cv2.minMaxLoc(scores)
+        if best < MIN_FOLLOW_SCORE:
+            return None
+
+        def offset(before, peak, after):
+            curve = before - 2 * peak + after
+            return 0.0 if curve == 0 else 0.5 * (before - after) / curve
+
+        dx = offset(scores[y, x - 1], best, scores[y, x + 1]) if 0 < x < scores.shape[1] - 1 else 0.0
+        dy = offset(scores[y - 1, x], best, scores[y + 1, x]) if 0 < y < scores.shape[0] - 1 else 0.0
+        return np.array([left + x + dx + half, top + y + dy + half])

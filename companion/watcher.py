@@ -5,17 +5,15 @@ reported through three callbacks so each front end can show it its own way.
 """
 
 import json
-import threading
 import time
 from collections import Counter, deque
 
 import cv2
-import mss
 import numpy as np
 import requests
 
 from . import app_cache, broken, driver, geometry, map_shape, selector, strats_api, win
-from .aim import AimGuide, scenery_region
+from .aim import AimGuide, Tracker
 from .driver import DriverError, StratsWindow
 from .minimap import MinimapReader
 from .paths import CALIBRATION_FILE
@@ -33,7 +31,6 @@ LOCK_METRES = 25        # once this close to the chosen lineup's standing spot, 
 PREVIEW_SIZE = 360
 IN_POSITION_METRES = 2.0  # this close to the standing spot, the aim guide starts matching the screen
 TEST_SPIKE_CLEARANCE = 3  # test mode: a spike this close to the player is still theirs, not dropped
-AIM_PERIOD = 1 / 30      # the aim reticle follows the camera this often while on the spot
 AIM_IMAGE_RETRY = 5.0
 
 
@@ -234,31 +231,6 @@ class Threats:
         return [position for position, seen in self.enemies + self.deaths if now - seen <= THREAT_SECONDS]
 
 
-class AimTracker(threading.Thread):
-    """Matches the screen against a lineup's aim screenshot as often as it can while the player is on the spot.
-
-    Only the middle of the screen is captured, and the minimap is not read, so the
-    reticle keeps up with the camera; the main loop goes on reading the minimap.
-    """
-
-    def __init__(self, lineup_id, matcher, publish, stop):
-        super().__init__(daemon=True)
-        self.lineup_id, self.matcher, self.publish = lineup_id, matcher, publish
-        self.stopped, self.watcher_stop = threading.Event(), stop
-
-    def run(self):
-        with mss.mss() as grabber:
-            monitor = grabber.monitors[1]
-            screen = (monitor["width"], monitor["height"])
-            left, top, width, height = scenery_region(*screen)
-            area = {"left": monitor["left"] + left, "top": monitor["top"] + top, "width": width, "height": height}
-            while not self.stopped.is_set() and not self.watcher_stop.is_set():
-                started = time.perf_counter()
-                image = np.asarray(grabber.grab(area))[:, :, :3]
-                self.publish(self.matcher.locate(image, (left, top), screen))
-                self.stopped.wait(max(0.0, AIM_PERIOD - (time.perf_counter() - started)))
-
-
 def frames(video, interval, stop):
     """Frames to analyse: the live primary screen, or a video file sampled every `interval` seconds.
 
@@ -361,7 +333,8 @@ class Watcher:
             self.last_aim = matcher.locate(frame)
         elif self.tracker is None or self.tracker.lineup_id != lineup["id"]:
             self._stop_tracker()
-            self.tracker = AimTracker(lineup["id"], matcher, self._publish_aim, self.stop_event)
+            self.tracker = Tracker(matcher, self._publish_aim, also_stop=self.stop_event)
+            self.tracker.lineup_id = lineup["id"]
             self.tracker.start()
         guide["aim"] = self.last_aim
         self.guide = guide
@@ -376,7 +349,7 @@ class Watcher:
 
     def _stop_tracker(self):
         if self.tracker is not None:
-            self.tracker.stopped.set()
+            self.tracker.stop()
             self.tracker = None
         self.last_aim = None
 

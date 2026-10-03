@@ -145,9 +145,11 @@ def frames(video, interval, stop):
 
 class Watcher:
     def __init__(self, map_name=None, agent_name=None, side=None, drive=True, interval=1.0, video=None,
-                 on_log=print, on_state=None, on_preview=None):
+                 on_log=print, on_state=None, on_preview=None, fullscreen=False, hide=False):
         self.map_name, self.agent_name, self.side = map_name, agent_name, side
         self.drive, self.interval, self.video = drive, interval, video
+        # Show the lineup video full size, and keep Strats.gg minimised while no lineup is open.
+        self.fullscreen, self.hide = fullscreen, hide
         self.on_log = on_log
         self.on_state = on_state or (lambda **changes: None)
         self.on_preview = on_preview
@@ -170,6 +172,15 @@ class Watcher:
             roi = roi[max(0, y - half):y + half, max(0, x - half):x + half]
         scale = PREVIEW_SIZE / max(roi.shape[:2])
         self.on_preview(cv2.resize(roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA))
+
+    def _park(self, window, maps, agents, map_item, agent_item, side, groups):
+        """Leave Strats.gg on the lineup map, so only the lineup click is left when the spike goes down."""
+        try:
+            window.show_map(maps, agents, map_item, agent_item, side, groups)
+            if self.hide:
+                window.minimize()
+        except DriverError as error:
+            self.on_log(f"Strats.gg: {error}")
 
     def _load_through_app(self, window, maps, agents, map_item, agent_item, side):
         """Open this map, agent and side in Strats.gg, which loads its lineups, and read them from the app's cache."""
@@ -270,10 +281,7 @@ class Watcher:
                 self.on_state(match=description, lineup="")
                 if self.drive:
                     # Set Strats.gg up now, so only the lineup click is left when the spike goes down.
-                    try:
-                        window.show_map(maps, agents, map_item, agent_item, target[2], groups)
-                    except DriverError as error:
-                        self.on_log(f"Strats.gg: {error}")
+                    self._park(window, maps, agents, map_item, agent_item, target[2], groups)
 
             if self.recalibrate:
                 self.recalibrate = False
@@ -305,10 +313,7 @@ class Watcher:
                     self.on_log(f"Closing the lineup: {over}.")
                     self.on_state(lineup="")
                     if self.drive:
-                        try:
-                            window.show_map(maps, agents, map_item, agent_item, target[2], groups)
-                        except DriverError as error:
-                            self.on_log(f"Strats.gg: {error}")
+                        self._park(window, maps, agents, map_item, agent_item, target[2], groups)
             if reading.registration is None:
                 self.on_state(minimap="not visible", spike="planted" if reading.planted else "not planted")
                 continue
@@ -376,6 +381,7 @@ class Watcher:
                 continue
             try:
                 window.show_map(maps, agents, map_item, agent_item, target[2], groups)
-                window.open_lineup(groups, selector.group_of(groups, lineup), lineup)
+                if window.open_lineup(groups, selector.group_of(groups, lineup), lineup) and self.fullscreen:
+                    window.fullscreen_video()
             except DriverError as error:
                 self.on_log(f"Strats.gg: {error}")

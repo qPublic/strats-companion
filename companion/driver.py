@@ -25,10 +25,15 @@ WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 MK_LBUTTON = 0x0001
+WM_KEYDOWN, WM_KEYUP, WM_CHAR = 0x0100, 0x0101, 0x0102
+VK_ESCAPE = 0x1B
 SW_SHOWNOACTIVATE = 4
+SW_SHOWMINNOACTIVE = 7
 MIN_WINDOW_WIDTH = 1000        # the Strats.gg window is a fixed 1748 px wide once restored
 
 NAV_LINEUPS = (624, 73)
+VIDEO = (660, 450)            # middle of the lineup page's video
+VIDEO_AREA = (50, 150, 1290, 800)
 BACK_BUTTON = (81, 128)
 CHANGE_MAP = (262, 313)
 CHANGE_AGENT = (255, 465)
@@ -115,6 +120,7 @@ class StratsWindow:
         self.templates = {name: cv2.imread(str(ASSETS / f"{name}.png")) for name in TEMPLATE_REGIONS}
         self.map_rect = DEFAULT_MAP_RECT
         self.shown = None
+        self.fullscreen = False
 
     def attach(self):
         windows = win.find_windows(WINDOW_TITLE)
@@ -145,6 +151,47 @@ class StratsWindow:
     def _post(self, message, flags, x, y):
         client_x, client_y = int(round(x)) - self.offset[0], int(round(y)) - self.offset[1]
         win.user32.PostMessageW(self.hwnd, message, flags, (client_y << 16) | (client_x & 0xFFFF))
+
+    def key(self, virtual_key, character=None):
+        """Press a key in the page without focusing the window."""
+        win.user32.PostMessageW(self.hwnd, WM_KEYDOWN, virtual_key, 1)
+        if character is not None:
+            win.user32.PostMessageW(self.hwnd, WM_CHAR, ord(character), 1)
+        time.sleep(0.05)
+        win.user32.PostMessageW(self.hwnd, WM_KEYUP, virtual_key, 0xC0000001)
+
+    def minimize(self):
+        """Minimise Strats.gg without taking focus; attach() brings it back when it is needed."""
+        if self.hwnd is not None and not win.user32.IsIconic(self.hwnd):
+            self.leave_fullscreen()
+            win.user32.ShowWindow(self.hwnd, SW_SHOWMINNOACTIVE)
+
+    def _video_playing(self):
+        left, top, right, bottom = VIDEO_AREA
+        first = self.capture()[top:bottom, left:right].astype(np.int16)
+        time.sleep(0.5)
+        second = self.capture()[top:bottom, left:right].astype(np.int16)
+        return float(np.abs(first - second).mean()) > 1.0
+
+    def fullscreen_video(self):
+        """Make the open lineup's video fill the Strats.gg window, still playing.
+
+        The player toggles full screen with F once it has keyboard focus. Clicking
+        the video gives it focus but also pauses it, so K starts it again.
+        """
+        self.click(*VIDEO)
+        time.sleep(0.4)
+        self.key(ord("F"), "f")
+        time.sleep(0.8)
+        self.fullscreen = self.state(self.capture()) != LINEUP_PAGE
+        if not self._video_playing():
+            self.key(ord("K"), "k")
+
+    def leave_fullscreen(self):
+        if self.fullscreen:
+            self.key(VK_ESCAPE)
+            self.fullscreen = False
+            time.sleep(0.6)
 
     def move(self, x, y):
         self._post(WM_MOUSEMOVE, 0, x, y)
@@ -256,6 +303,9 @@ class StratsWindow:
             elif state == AGENT_DIALOG:
                 self.click(*self._grid_cell(AGENT_GRID, agent_index))
                 agent_done = True
+            elif state == OTHER and self.fullscreen:
+                self.leave_fullscreen()
+                continue
             elif state == OTHER:
                 self.click(*NAV_LINEUPS)
             else:

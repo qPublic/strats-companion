@@ -11,12 +11,11 @@ MAX_WALK = 35.0
 # Standing spots this close to a recently spotted enemy or a teammate's death are avoided.
 DANGER_RADIUS = 14.0
 
-# Abilities that stop or punish a defuse. Lineups using one of these win over
-# anything else that happens to land near the spike (smokes, recon, traps).
+# Mollies and other thrown abilities that damage a defuser. For an agent with one
+# of these, only these are used: never a smoke, recon or trap, and not ultimates.
 POST_PLANT_ABILITIES = {
-    "Aftershock", "Incendiary", "Orbital Strike", "Mosh Pit", "FRAG/ment", "Nanoswarm",
-    "Hot Hands", "Paint Shells", "Shock Bolt", "Double Shock Bolt", "Hunter's Fury",
-    "Snake Bite", "Guided Salvo", "Armageddon",
+    "Aftershock", "Incendiary", "Mosh Pit", "FRAG/ment", "Nanoswarm", "Hot Hands",
+    "Paint Shells", "Shock Bolt", "Double Shock Bolt", "Snake Bite", "Guided Salvo",
 }
 
 
@@ -37,7 +36,8 @@ def in_cone(spot, spike):
 def choose(map_item, lineups, spike, player=None, preferred_abilities=(), threats=()):
     """The best lineup landing within SPIKE_RADIUS of the spike, or None when nothing lands there.
 
-    Lineups using a preferred ability are considered first. Standing spots
+    With `preferred_abilities` (the agent's mollies), only lineups using one of
+    them count; an agent without any can use whatever lands there. Standing spots
     within DANGER_RADIUS of a threat (a spotted enemy or a teammate's death) are
     dropped; if every spot is that close, the one farthest from the threats
     wins. Otherwise the standing spot closest to the spike inside the
@@ -52,8 +52,8 @@ def choose(map_item, lineups, spike, player=None, preferred_abilities=(), threat
             continue
         if geometry.distance(landing, spike) <= geometry.map_distance(map_item, SPIKE_RADIUS):
             candidates.append(lineup)
-    preferred = [lineup for lineup in candidates if lineup["abilityId"] in preferred_abilities]
-    candidates = preferred or candidates
+    if preferred_abilities:
+        candidates = [lineup for lineup in candidates if lineup["abilityId"] in preferred_abilities]
     if not candidates:
         return None
 

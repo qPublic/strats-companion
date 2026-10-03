@@ -22,6 +22,8 @@ TEXT = "#e6e8ec"
 MUTED = "#8b919c"
 ACCENT = "#ff4655"
 STRATS_TOPMOST_REFRESH_MS = 1000
+MIN_WIDTH, MIN_HEIGHT = 760, 520
+MIN_PREVIEW = 160
 STATE_ROWS = (("match", "Match"), ("minimap", "Minimap"), ("spike", "Spike"), ("player", "You"), ("lineup", "Lineup"))
 
 
@@ -35,7 +37,6 @@ class App:
         root.title(f"Strats Companion {__version__}")
         self.update = None
         root.configure(bg=BACKGROUND)
-        root.resizable(False, False)
         style = ttk.Style()
         style.theme_use("clam")
         style.configure(".", background=BACKGROUND, foreground=TEXT, fieldbackground=PANEL)
@@ -68,6 +69,10 @@ class App:
         self.pin_strats = tk.BooleanVar(value=False)
         ttk.Checkbutton(pins, text="Keep this window on top", variable=self.pin_self, command=self.apply_pins).grid(row=0, column=0)
         ttk.Checkbutton(pins, text="Keep Strats.gg on top", variable=self.pin_strats, command=self.apply_pins).grid(row=0, column=1, padx=(18, 0))
+        self.fullscreen = tk.BooleanVar(value=True)
+        self.hide_strats = tk.BooleanVar(value=True)
+        ttk.Checkbutton(pins, text="Full-screen the lineup video", variable=self.fullscreen, command=self.apply_options).grid(row=0, column=2, padx=(18, 0))
+        ttk.Checkbutton(pins, text="Minimise Strats.gg between lineups", variable=self.hide_strats, command=self.apply_options).grid(row=0, column=3, padx=(18, 0))
         self.toggle = ttk.Button(controls, text="Start", style="Accent.TButton", command=self.toggle_watching, width=10)
         self.toggle.grid(row=1, column=4, padx=(14, 0))
 
@@ -89,10 +94,18 @@ class App:
         self.preview = tk.Label(root, bg=PANEL, width=PREVIEW_SIZE, height=PREVIEW_SIZE, bd=0)
         self.blank = tk.PhotoImage(width=PREVIEW_SIZE, height=PREVIEW_SIZE)
         self.preview.configure(image=self.blank)
-        self.preview.grid(row=1, column=1, padx=(0, 14), pady=6)
+        self.preview.grid(row=1, column=1, padx=(0, 14), pady=6, sticky="nsew")
 
         self.log = tk.Text(root, height=8, width=92, bg=PANEL, fg=TEXT, bd=0, padx=8, pady=6, state="disabled", wrap="word")
-        self.log.grid(row=2, column=0, columnspan=2, padx=14, pady=(6, 8))
+        self.log.grid(row=2, column=0, columnspan=2, padx=14, pady=(6, 8), sticky="nsew")
+        # The window can be resized: the preview and the log take up the extra room.
+        root.columnconfigure(1, weight=1)
+        root.rowconfigure(1, weight=3)
+        root.rowconfigure(2, weight=1)
+        root.minsize(MIN_WIDTH, MIN_HEIGHT)
+        # Fix the opening size, so the window keeps whatever size it has when the preview changes.
+        root.update_idletasks()
+        root.geometry(f"{root.winfo_reqwidth()}x{root.winfo_reqheight()}")
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         updater.remove_previous()
@@ -128,6 +141,8 @@ class App:
             agent_name=None if agent_name == AUTO else agent_name,
             side=None if side == AUTO else side,
             drive=self.drive.get(),
+            fullscreen=self.fullscreen.get(),
+            hide=self.hide_strats.get(),
             on_log=lambda text: self.events.put(("log", text)),
             on_state=lambda **changes: self.events.put(("state", changes)),
             on_preview=lambda image: self.events.put(("preview", image)),
@@ -181,6 +196,10 @@ class App:
         self.events.put(("restart", None))
 
     # ---- always on top -----------------------------------------------------
+
+    def apply_options(self):
+        if self.watcher is not None:
+            self.watcher.fullscreen, self.watcher.hide = self.fullscreen.get(), self.hide_strats.get()
 
     def apply_pins(self):
         self.root.attributes("-topmost", self.pin_self.get())
@@ -243,9 +262,14 @@ class App:
         except queue.Empty:
             pass
         if latest_preview is not None:
-            encoded = cv2.imencode(".png", latest_preview)[1].tobytes()
+            # Fit the preview to the room the window gives it.
+            size = max(MIN_PREVIEW, min(self.preview.winfo_width(), self.preview.winfo_height()) - 4)
+            scale = size / max(latest_preview.shape[:2])
+            interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+            fitted = cv2.resize(latest_preview, None, fx=scale, fy=scale, interpolation=interpolation)
+            encoded = cv2.imencode(".png", fitted)[1].tobytes()
             self.photo = tk.PhotoImage(data=base64.b64encode(encoded))
-            self.preview.configure(image=self.photo, width=PREVIEW_SIZE, height=PREVIEW_SIZE)
+            self.preview.configure(image=self.photo, width=1, height=1)
         self.root.after(100, self.drain)
 
     def close(self):

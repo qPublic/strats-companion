@@ -67,8 +67,17 @@ loads them, and reads them from there.
 
 ## How a lineup is chosen
 
-A lineup qualifies when it lands within 4.5 m of the spike. Lineups using a post-plant ability (mollies, shock darts and similar,
-listed in `companion/selector.py`) win over others.
+A lineup qualifies when it lands within 4.5 m of the spike and uses the
+agent's molly (or a similar thrown ability that damages a defuser, such as
+Sova's shock darts or Killjoy's Nanoswarm, listed in `companion/selector.py`).
+Smokes, recon, traps and ultimates are never picked for an agent that has a
+molly; if none of its mollies lands on the spike, nothing is opened. Agents
+without one can use any lineup that lands there.
+
+With "Full-screen the lineup video" ticked, an opened lineup's video fills the
+Strats.gg window (Strats.gg does not allow true full screen). With "Minimise
+Strats.gg between lineups" ticked, Strats.gg is set up on the right map and
+then minimised, and is restored when a lineup opens.
 
 Standing spots within 14 m of a threat are skipped. A
 threat is an enemy seen on the minimap (red-ringed icon) or a place where a

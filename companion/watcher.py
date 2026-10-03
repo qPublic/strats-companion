@@ -14,7 +14,7 @@ import mss
 import numpy as np
 import requests
 
-from . import app_cache, driver, geometry, map_shape, selector, strats_api, win
+from . import app_cache, broken, driver, geometry, map_shape, selector, strats_api, win
 from .aim import AimGuide, scenery_region
 from .driver import DriverError, StratsWindow
 from .minimap import MinimapReader
@@ -294,6 +294,8 @@ class Watcher:
         self.on_guide = on_guide
         # Practice without planting: a spike dropped on the ground is treated as planted there.
         self.test_mode = test_mode
+        # Set from the window: "broken" (never pick the open lineup again) or "next" (try the next one).
+        self.request = None
         self.aim_guides = {}        # lineup id -> (AimGuide, picture) or (None, time of the last try)
         self.guide_shown = False
         self.guide = None           # the latest minimap part of the guide, which the aim tracker adds to
@@ -425,6 +427,8 @@ class Watcher:
         locked = False
         opened_round = unplanted = 0
         opened_spike = None
+        skipped = set()        # lineups passed over with "Next lineup" for the current plant
+        immediate = False      # open the next pick at once, without waiting for it to repeat
         used_lineups = []      # (spike, lineup id) for each lineup used this match
         waiting_reason = refused = None
         retry_at = 0.0
@@ -538,6 +542,7 @@ class Watcher:
                     if self.on_guide is not None:
                         self._hide_guide()
                     used_lineups.append((opened_spike, opened["id"]))
+                    skipped.clear()
                     opened = pending = last_spike = None
                     locked = False
                     self.on_log(f"Closing the lineup: {over}.")
@@ -589,6 +594,21 @@ class Watcher:
             if not reading.planted:
                 last_spike = None
                 continue
+            if self.request is not None:
+                request, self.request = self.request, None
+                if opened is None:
+                    self.on_log("No lineup is open.")
+                else:
+                    if request == "broken":
+                        broken.mark(opened)
+                        self.on_log(f"Marked {opened['title']} as broken; it will not be picked again.")
+                    else:
+                        skipped.add(opened["id"])
+                    if self.on_guide is not None:
+                        self._hide_guide()
+                    opened = pending = None
+                    locked = False
+                    immediate = True
             if opened is not None and not locked and last_player is not None:
                 away = geometry.metres(map_item, last_player, geometry.standing_spot(opened))
                 if away <= LOCK_METRES:
@@ -609,18 +629,25 @@ class Watcher:
                 lineup_id for spike, lineup_id in used_lineups
                 if geometry.metres(map_item, spike, reading.spike) <= SAME_PLANT_METRES
             )
-            lineup = selector.choose(
+            choose = lambda exclude: selector.choose(  # noqa: E731
                 map_item, lineups, reading.spike, last_player, selector.post_plant_ability_ids(agent_item),
-                threats.active(now), used,
+                threats.active(now), used, exclude,
             )
+            lineup = choose(broken.ids() | skipped)
+            if lineup is None and skipped:
+                skipped.clear()
+                lineup = choose(broken.ids())
+                if lineup is not None:
+                    self.on_log("That was the last lineup for this plant; back to the first.")
             if lineup is None:
                 self.on_state(lineup="none lands on the spike")
                 continue
             if opened is not None and lineup["id"] == opened["id"]:
                 continue
-            if lineup["id"] != pending:
+            if lineup["id"] != pending and not immediate:
                 pending = lineup["id"]
                 continue
+            immediate = False
             opened, opened_round, unplanted, opened_spike = lineup, sides.rounds, 0, reading.spike
             if used:
                 usual = selector.choose(

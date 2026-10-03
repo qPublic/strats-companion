@@ -35,59 +35,57 @@ def in_cone(spot, spike):
     return down > 0 and abs(across) <= down
 
 
-def choose(map_item, lineups, spike, player=None, preferred_abilities=(), threats=(), used=None):
-    """The best lineup landing within SPIKE_RADIUS of the spike, or None when nothing lands there.
+def choose(map_item, lineups, spike, player=None, preferred_abilities=(), threats=(), used=None, exclude=()):
+    """The best lineup landing within SPIKE_RADIUS of the spike, or None when nothing lands there."""
+    best = ranked(map_item, lineups, spike, player, preferred_abilities, threats, used, exclude)
+    return best[0] if best else None
+
+
+def ranked(map_item, lineups, spike, player=None, preferred_abilities=(), threats=(), used=None, exclude=()):
+    """Every lineup landing within SPIKE_RADIUS of the spike, best first.
 
     With `preferred_abilities` (the agent's mollies), only lineups using one of
-    them count; an agent without any can use whatever lands there. `used` counts
-    how often each lineup was used for this plant before; one used REPEAT_LIMIT
-    times is skipped while others are left. Standing spots
-    within DANGER_RADIUS of a threat (a spotted enemy or a teammate's death) are
-    dropped; if every spot is that close, the one farthest from the threats
-    wins. Otherwise the standing spot closest to the spike inside the
-    south-facing cone wins, preferring spots within MAX_WALK of the player.
-    With nothing in the cone, the standing spot nearest the player wins (or,
-    without a player position, the one closest to the spike).
+    them count; an agent without any can use whatever lands there. Lineups whose
+    id is in `exclude` (marked broken, or skipped while testing) are left out.
+    In order of importance:
+    - `used` counts how often each lineup was used for this plant before; ones
+      used fewer than REPEAT_LIMIT times come first, then the least used.
+    - Standing spots more than DANGER_RADIUS from every threat (a spotted enemy
+      or a teammate's death) come first; the others follow, farthest first.
+    - Standing spots inside the south-facing cone and within MAX_WALK of the
+      player, then the rest of the cone, closest to the spike first; then spots
+      outside the cone, nearest the player first (or nearest the spike, without
+      a player position).
     """
     candidates = []
     for lineup in lineups:
         landing = geometry.landing_point(lineup)
-        if landing is None:
+        if landing is None or lineup["id"] in exclude:
             continue
         if geometry.distance(landing, spike) <= geometry.map_distance(map_item, SPIKE_RADIUS):
             candidates.append(lineup)
     if preferred_abilities:
         candidates = [lineup for lineup in candidates if lineup["abilityId"] in preferred_abilities]
-    if not candidates:
-        return None
-    if used:
-        # Stay unpredictable: a lineup used REPEAT_LIMIT times for this plant gives way to the
-        # others; once all have had their turns, the least used ones are left.
-        fresh = [lineup for lineup in candidates if used.get(lineup["id"], 0) < REPEAT_LIMIT]
-        least = min(used.get(lineup["id"], 0) for lineup in candidates)
-        candidates = fresh or [lineup for lineup in candidates if used.get(lineup["id"], 0) == least]
+    used = used or {}
+    safe_distance = geometry.map_distance(map_item, DANGER_RADIUS)
+    reach = geometry.map_distance(map_item, MAX_WALK)
 
-    def danger(lineup):
-        """Distance from the standing spot to the nearest threat."""
+    def order(lineup):
         spot = geometry.standing_spot(lineup)
-        return min((geometry.distance(spot, threat) for threat in threats), default=float("inf"))
+        uses = used.get(lineup["id"], 0)
+        # Stay unpredictable: a lineup used REPEAT_LIMIT times for this plant gives way to the others.
+        use_rank = 0 if uses < REPEAT_LIMIT else uses
+        danger = min((geometry.distance(spot, threat) for threat in threats), default=float("inf"))
+        danger_rank = (0, 0.0) if danger > safe_distance else (1, -danger)
+        from_spike = geometry.distance(spot, spike)
+        if in_cone(spot, spike):
+            near_player = player is None or geometry.distance(spot, player) <= reach
+            place_rank = (0 if near_player else 1, from_spike)
+        else:
+            place_rank = (2, from_spike if player is None else geometry.distance(spot, player))
+        return use_rank, danger_rank, place_rank
 
-    safe = [lineup for lineup in candidates if danger(lineup) > geometry.map_distance(map_item, DANGER_RADIUS)]
-    if not safe:
-        return max(candidates, key=danger)
-
-    def from_spike(lineup):
-        return geometry.distance(geometry.standing_spot(lineup), spike)
-
-    cone = [lineup for lineup in safe if in_cone(geometry.standing_spot(lineup), spike)]
-    if cone:
-        if player is not None:
-            reachable = [lineup for lineup in cone if geometry.distance(geometry.standing_spot(lineup), player) <= geometry.map_distance(map_item, MAX_WALK)]
-            cone = reachable or cone
-        return min(cone, key=from_spike)
-    if player is not None:
-        return min(safe, key=lambda lineup: geometry.distance(geometry.standing_spot(lineup), player))
-    return min(safe, key=from_spike)
+    return sorted(candidates, key=order)
 
 
 def group_of(groups, lineup):

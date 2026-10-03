@@ -12,7 +12,7 @@ from tkinter import ttk
 
 import cv2
 
-from . import __version__, prefetch, strats_api, updater, win
+from . import __version__, broken, prefetch, strats_api, updater, win
 from .paths import CAPTURE_DIR, DATA_DIR
 from .driver import WINDOW_TITLE as STRATS_TITLE
 from .overlay import Overlay
@@ -55,6 +55,7 @@ class App:
         style.configure("TButton", background=PANEL, foreground=TEXT, padding=6)
         style.configure("Accent.TButton", background=ACCENT, foreground="#ffffff", padding=6)
         style.map("Accent.TButton", background=[("active", "#ff6b77")])
+        style.map("TButton", background=[("disabled", BACKGROUND)], foreground=[("disabled", MUTED)])
         style.configure("TCombobox", fieldbackground=PANEL, background=PANEL, foreground=TEXT, arrowcolor=TEXT)
         style.map("TCombobox", fieldbackground=[("readonly", PANEL)], foreground=[("readonly", TEXT)])
 
@@ -106,6 +107,12 @@ class App:
         ttk.Button(buttons, text="Save screenshot", command=self.save_screenshot).grid(row=0, column=1, padx=(8, 0))
         self.check_button = ttk.Button(buttons, text="Check for updates", command=self.check_for_updates)
         self.check_button.grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(buttons, text="Broken lineup", command=self.mark_broken).grid(row=1, column=0, pady=(8, 0), sticky="ew")
+        self.next_button = ttk.Button(buttons, text="Next lineup", command=self.next_lineup)
+        self.next_button.grid(row=1, column=1, padx=(8, 0), pady=(8, 0), sticky="ew")
+        self.clear_button = ttk.Button(buttons, text="", command=self.clear_broken)
+        self.clear_button.grid(row=1, column=2, padx=(8, 0), pady=(8, 0), sticky="ew")
+        self._refresh_lineup_buttons()
         self.update_button = ttk.Button(status, text="", style="Accent.TButton", command=self.install_update)
         self.update_button.grid(row=len(STATE_ROWS) + 1, column=0, columnspan=2, sticky="w", pady=(12, 0))
         self.update_button.grid_remove()
@@ -131,6 +138,7 @@ class App:
         self.rescale_pending = None
         self.resume_after_update = False
         settings = self._load_settings()
+        self._refresh_lineup_buttons()
         root.geometry(settings.get("geometry") or f"{self.base_size[0]}x{self.base_size[1]}")
         root.bind("<Configure>", self._on_resize)
 
@@ -250,6 +258,30 @@ class App:
             self.events.put(("log", traceback.format_exc(limit=3)))
         self.events.put(("stopped", None))
 
+    def _refresh_lineup_buttons(self):
+        count = len(broken.ids())
+        self.clear_button.configure(text=f"Clear broken ({count})", state="normal" if count else "disabled")
+        # Trying lineup after lineup on one plant is for practice only.
+        self.next_button.configure(state="normal" if self.test_mode.get() else "disabled")
+
+    def _send(self, request):
+        if self.watcher is None or self.worker is None or not self.worker.is_alive():
+            self.write_log("Start watching first.")
+            return False
+        self.watcher.request = request
+        return True
+
+    def mark_broken(self):
+        if self._send("broken"):
+            self.root.after(1500, self._refresh_lineup_buttons)
+
+    def next_lineup(self):
+        self._send("next")
+
+    def clear_broken(self):
+        self.write_log(f"Cleared {broken.clear()} broken lineup marks.")
+        self._refresh_lineup_buttons()
+
     def recalibrate(self):
         if self.watcher is not None:
             self.watcher.recalibrate = True
@@ -300,6 +332,7 @@ class App:
         if self.watcher is not None:
             self.watcher.fullscreen, self.watcher.hide = self.fullscreen.get(), self.hide_strats.get()
             self.watcher.test_mode = self.test_mode.get()
+        self._refresh_lineup_buttons()
         if not self.show_guide.get():
             self.overlay.show(None)
 

@@ -30,7 +30,9 @@ LINE_THRESHOLD = 18
 ICON_RADIUS = 27.5             # player icon radius in map view units
 MIN_WHITE_RING = 0.35
 MAX_TEAL_RING = 0.15          # teammates' icons have a teal ring
-MIN_RED_RING = 0.35           # spotted enemies' icons have a red ring
+MIN_RED_RING = 0.35           # spotted enemies' icons have a red ring...
+MAX_RED_INSIDE = 0.35         # ...around a portrait, not a red fill...
+MAX_RED_OUTSIDE = 0.2         # ...on the map, not amid red. Fire seen through the minimap fails these.
 # Dead teammates are marked with a blue X (dead enemies with a red one, which is ignored).
 DEATH_SIZE = (0.3, 1.3)       # X width and height as a fraction of an icon's diameter
 MAX_DEATH_FILL = 0.8          # an X covers part of its box; a solid blob covers nearly all of it
@@ -106,6 +108,8 @@ class MinimapReader:
         self.inside = cv2.dilate(silhouette, np.ones((25, 25), np.uint8))
         # Player icons sit on ledges and map edges the silhouette does not cover.
         self.nearby = cv2.dilate(silhouette, np.ones((121, 121), np.uint8))
+        # Where other players can stand: the walkable map, give or take a few pixels.
+        self.walkable = cv2.dilate(silhouette, np.ones((9, 9), np.uint8))
         self.frame_height = frame_height
         self.scale = scale
         self.last = None
@@ -280,19 +284,26 @@ class MinimapReader:
         height, width = white.shape
         angles = np.linspace(0, 2 * np.pi, 48, endpoint=False)
         player, enemies = None, []
+
+        def share(mask, center_x, center_y, ring_radius):
+            xs = np.clip((center_x + ring_radius * np.cos(angles)).astype(int), 0, width - 1)
+            ys = np.clip((center_y + ring_radius * np.sin(angles)).astype(int), 0, height - 1)
+            return float(mask[ys, xs].mean())
+
         for center_x, center_y, found_radius in circles[0]:
             ring = teammate = enemy = 0.0
             for ring_radius in (found_radius - 1, found_radius, found_radius + 1):
-                xs = np.clip((center_x + ring_radius * np.cos(angles)).astype(int), 0, width - 1)
-                ys = np.clip((center_y + ring_radius * np.sin(angles)).astype(int), 0, height - 1)
-                ring = max(ring, float(white[ys, xs].mean()))
-                teammate = max(teammate, float(teal[ys, xs].mean()))
-                enemy = max(enemy, float(red[ys, xs].mean()))
+                ring = max(ring, share(white, center_x, center_y, ring_radius))
+                teammate = max(teammate, share(teal, center_x, center_y, ring_radius))
+                enemy = max(enemy, share(red, center_x, center_y, ring_radius))
             center = (float(center_x), float(center_y))
             if not self._on_map(registration, center, self.nearby):
                 continue
             if enemy >= MIN_RED_RING:
-                enemies.append(center)
+                if (share(red, center_x, center_y, found_radius * 0.5) <= MAX_RED_INSIDE
+                        and share(red, center_x, center_y, found_radius * 1.6) <= MAX_RED_OUTSIDE
+                        and self._on_map(registration, center, self.walkable)):
+                    enemies.append(center)
             elif ring >= MIN_WHITE_RING and teammate <= MAX_TEAL_RING and (player is None or ring > player[0]):
                 player = (ring, center)
         return (None if player is None else player[1]), enemies

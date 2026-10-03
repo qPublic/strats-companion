@@ -29,6 +29,7 @@ DEFAULT_SCALE = 0.405          # zoom seen with default minimap settings at both
 LINE_THRESHOLD = 18
 ICON_RADIUS = 27.5             # player icon radius in map view units
 MIN_WHITE_RING = 0.35
+MIN_POINTER_PIXELS = 3        # the facing pointer on the player's icon, after thin lines are removed
 MAX_TEAL_RING = 0.15          # teammates' icons have a teal ring
 MIN_RED_RING = 0.35           # spotted enemies' icons have a red ring...
 MAX_RED_INSIDE = 0.35         # ...around a portrait, not a red fill...
@@ -71,6 +72,34 @@ class Reading:
     player: tuple = None
     enemies: list = field(default_factory=list)
     deaths: list = field(default_factory=list)      # where teammates died
+
+
+def _pointer_angle(roi, center, radius):
+    """Screen angle (degrees; 0 right, 90 down) of the white pointer on the player's icon ring, or None.
+
+    The pointer is a small solid white triangle on the ring, on the side the
+    player faces; thin white map outlines are eroded away first.
+    """
+    reach = int(radius * 1.7) + 2
+    x0, y0 = max(0, int(center[0]) - reach), max(0, int(center[1]) - reach)
+    patch = roi[y0:int(center[1]) + reach, x0:int(center[0]) + reach]
+    if patch.size == 0:
+        return None
+    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    white = ((hsv[:, :, 1] < 45) & (hsv[:, :, 2] > 235)).astype(np.uint8)
+    white = cv2.erode(white, np.ones((3, 3), np.uint8)) > 0
+    ys, xs = np.mgrid[0:patch.shape[0], 0:patch.shape[1]]
+    dx, dy = xs + x0 - center[0], ys + y0 - center[1]
+    distance = np.hypot(dx, dy)
+    ring = white & (distance > radius) & (distance < radius * 1.6)
+    if ring.sum() < MIN_POINTER_PIXELS:
+        return None
+    angles = np.degrees(np.arctan2(dy[ring], dx[ring]))
+    counts, edges = np.histogram(angles, bins=36, range=(-180, 180))
+    peak = edges[int(np.argmax(counts))] + 5
+    near = np.abs((angles - peak + 180) % 360 - 180) <= 25
+    return float(np.degrees(np.arctan2(np.sin(np.radians(angles[near])).mean(),
+                                       np.cos(np.radians(angles[near])).mean())))
 
 
 def spike_planted(frame):
@@ -267,8 +296,11 @@ class MinimapReader:
                 best = (area, centers[index])
         return None if best is None else tuple(best[1])
 
-    def _find_icons(self, roi, registration):
-        """Screen positions of the player's own icon (or None) and of spotted enemies' icons."""
+    def _find_icons(self, roi, registration, offset=(0, 0)):
+        """Screen positions of the player's own icon (or None) and of spotted enemies' icons.
+
+        `roi` may be a part of the minimap region starting at `offset`.
+        """
         radius = ICON_RADIUS * registration.scale
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         white = (hsv[:, :, 1] < 50) & (hsv[:, :, 2] > 205)
@@ -296,7 +328,7 @@ class MinimapReader:
                 ring = max(ring, share(white, center_x, center_y, ring_radius))
                 teammate = max(teammate, share(teal, center_x, center_y, ring_radius))
                 enemy = max(enemy, share(red, center_x, center_y, ring_radius))
-            center = (float(center_x), float(center_y))
+            center = (float(center_x) + offset[0], float(center_y) + offset[1])
             if not self._on_map(registration, center, self.nearby):
                 continue
             if enemy >= MIN_RED_RING:
@@ -322,6 +354,38 @@ class MinimapReader:
                 continue
             deaths.append(tuple(centers[index]))
         return deaths
+
+    def player_and_facing(self, roi, registration, near=None, origin=(0, 0)):
+        """(map position, facing as a map-direction angle in degrees, icon screen position), each possibly None.
+
+        `roi` is the minimap region, or the part of it starting at `origin`. With
+        `near` (the icon's last screen position) only the area around it is
+        searched, which is quick enough to run many times a second.
+        """
+        offset = origin
+        if near is not None:
+            reach = self.icon_reach(registration)
+            left, top = max(origin[0], int(near[0]) - reach), max(origin[1], int(near[1]) - reach)
+            roi = roi[top - origin[1]:int(near[1]) + reach - origin[1], left - origin[0]:int(near[0]) + reach - origin[0]]
+            offset = (left, top)
+        player, _ = self._find_icons(roi, registration, offset)
+        if player is None:
+            return None, None, None
+        local = (player[0] - offset[0], player[1] - offset[1])
+        angle = _pointer_angle(roi, local, ICON_RADIUS * registration.scale)
+        facing = None
+        if angle is not None:
+            # From a screen angle to a direction on the map art (the minimap may be turned).
+            start = np.array(registration.to_map(player))
+            end = np.array(registration.to_map((player[0] + np.cos(np.radians(angle)) * 10,
+                                                player[1] + np.sin(np.radians(angle)) * 10)))
+            facing = float(np.degrees(np.arctan2(end[1] - start[1], end[0] - start[0])))
+        return registration.to_map(player), facing, player
+
+    @staticmethod
+    def icon_reach(registration):
+        """How far around its last position the player's icon is looked for, in pixels."""
+        return int(ICON_RADIUS * registration.scale * 5)
 
     def find_dropped_spike(self, frame, registration):
         """Map position of a spike icon lying on the map although none is planted (test mode), or None."""

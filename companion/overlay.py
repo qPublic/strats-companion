@@ -50,6 +50,7 @@ class Overlay:
         self.photo = None
         self.visible = False
         self.static_key = self.aim_mode = self.aim_key = None
+        self.ground_mode = None
 
     def _text(self, x, y, text, color=TEXT, size=16, anchor="center", tag="static"):
         font = ("Segoe UI", size, "bold")
@@ -65,12 +66,14 @@ class Overlay:
         if guide is None:
             self.canvas.delete("all")
             self.static_key = self.aim_mode = self.aim_key = None
+            self.ground_mode = None
             if self.visible:
                 self.window.withdraw()
                 self.visible = False
             return
         scale = self.size[1] / 1440
         self._draw_static(guide, scale)
+        self._draw_ground(guide.get("ground"), scale)
         self._draw_aim(guide, scale)
         if not self.visible:
             self.window.deiconify()
@@ -95,6 +98,54 @@ class Overlay:
             self.canvas.create_oval(stand[0] - radius, stand[1] - radius, stand[0] + radius, stand[1] + radius,
                                     outline=STAND, width=max(2, int(3 * scale)), tags="static")
             self._text(stand[0], stand[1] - radius - 14 * scale, label, STAND, int(13 * scale))
+
+    def _draw_ground(self, marker, scale):
+        """The standing spot in the world: a ring on the floor with a post, or an arrow to turn towards it."""
+        if marker is None:
+            if self.ground_mode is not None:
+                self.canvas.delete("ground")
+                self.ground_mode = None
+            return
+        label = f"Stand here  {marker['metres']:.0f} m"
+        if marker.get("ring") is not None and marker.get("pin") is not None:
+            ring = [value for point in marker["ring"] for value in point]
+            (fx, fy), (hx, hy) = marker["pin"]
+            if self.ground_mode != "ring":
+                self.canvas.delete("ground")
+                width = max(3, int(4 * scale))
+                self.canvas.create_polygon(*ring, outline=SHADOW, fill="", width=width + 3, tags=("ground", "ground-shadow"))
+                self.canvas.create_polygon(*ring, outline=STAND, fill="", width=width, tags=("ground", "ground-ring"))
+                self.canvas.create_line(fx, fy, hx, hy, fill=SHADOW, width=width + 3, tags=("ground", "ground-pin-shadow"))
+                self.canvas.create_line(fx, fy, hx, hy, fill=STAND, width=width, tags=("ground", "ground-pin"))
+                font = ("Segoe UI", int(15 * scale), "bold")
+                self.canvas.create_text(hx + 2, hy - 14 * scale + 2, text=label, fill=SHADOW, font=font, tags=("ground", "ground-label-shadow"))
+                self.canvas.create_text(hx, hy - 14 * scale, text=label, fill=STAND, font=font, tags=("ground", "ground-label"))
+                self.ground_mode = "ring"
+            self.canvas.coords("ground-shadow", *ring)
+            self.canvas.coords("ground-ring", *ring)
+            self.canvas.coords("ground-pin-shadow", fx, fy, hx, hy)
+            self.canvas.coords("ground-pin", fx, fy, hx, hy)
+            self.canvas.coords("ground-label-shadow", hx + 2, hy - 14 * scale + 2)
+            self.canvas.coords("ground-label", hx, hy - 14 * scale)
+            self.canvas.itemconfigure("ground-label-shadow", text=label)
+            self.canvas.itemconfigure("ground-label", text=label)
+        else:
+            # Behind the camera or off screen: an arrow along the bottom pointing the way to turn.
+            turn = marker["turn"]
+            key = ("arrow", round(turn / 5), round(marker["metres"]))
+            if self.ground_mode == key:
+                return
+            self.canvas.delete("ground")
+            width, height = self.size
+            y = height * 0.72
+            direction = 1 if turn > 0 else -1
+            x = width / 2 + direction * width * 0.18
+            where = "behind you" if abs(turn) > 135 else ("to your right" if turn > 0 else "to your left")
+            self.canvas.create_line(x - direction * 60 * scale, y, x + direction * 60 * scale, y, fill=STAND,
+                                    width=max(5, int(10 * scale)), arrow="last",
+                                    arrowshape=(26 * scale, 30 * scale, 12 * scale), tags="ground")
+            self._text(x, y + 34 * scale, f"Spot {marker['metres']:.0f} m {where}", STAND, int(16 * scale), tag="ground")
+            self.ground_mode = key
 
     def _draw_aim(self, guide, scale):
         """Where to aim: a reticle on the spot, an arrow at the edge pointing the way to turn, or the screenshot."""

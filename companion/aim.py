@@ -268,7 +268,15 @@ class Tracker:
 
     def start(self):
         for loop in (self._match_loop, self._follow_loop):
-            threading.Thread(target=loop, daemon=True).start()
+            threading.Thread(target=self._guarded, args=(loop,), daemon=True).start()
+
+    def _guarded(self, loop):
+        """Run a loop; if it fails (a capture error, say), start it again after a pause rather than dying."""
+        while not self._done():
+            try:
+                loop()
+            except Exception:  # noqa: BLE001 - the guide must not take the companion down
+                self.stopped.wait(1.0)
 
     def stop(self):
         self.stopped.set()

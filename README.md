@@ -132,6 +132,14 @@ With "Show in-game guide" ticked, the chosen lineup is drawn over the game
 - **Where to stand**, on the minimap: a ring on the standing spot, a dashed
   line to where it lands, and the distance, which turns to "In position"
   within 2 m.
+- **Where to stand, in the world**: a ring on the floor at the standing spot
+  with a post and the distance, drawn in perspective where the spot is, so you
+  can walk to it without looking at the minimap. When the spot is behind you
+  or off screen, an arrow along the bottom says which way to turn. The camera
+  is worked out from the screen: position from your minimap icon, facing from
+  the pointer on it, looking up or down from how vertical edges lean, and
+  every small turn in between from how the picture shifts (about 30 times a
+  second). The floor is taken to be level with your feet.
 - **Where to aim**, once in position: the lineup's aim screenshot is matched
   against the screen. Standing on the spot, the two views differ only by how
   the camera is turned (the field of view is fixed), so the match gives that
@@ -139,7 +147,8 @@ With "Show in-game guide" ticked, the chosen lineup is drawn over the game
   screen, an arrow at the edge says which way and how far to turn. If the
   scenery cannot be matched, the screenshot itself is shown on the right.
 
-The drawing ignores the mouse, never takes focus, and is kept out of screen
+The guide comes up as soon as the lineup is picked; Strats.gg opens the video
+alongside it. The drawing ignores the mouse, never takes focus, and is kept out of screen
 captures, so the companion's own minimap reads never see it. It uses only the
 screen, never the game's memory. The aim screenshot comes from Strats.gg, or
 from the Strats.gg app's cache once the lineup has been opened there. It is

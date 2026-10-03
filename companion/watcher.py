@@ -5,6 +5,8 @@ reported through three callbacks so each front end can show it its own way.
 """
 
 import json
+import queue
+import threading
 import time
 from collections import Counter, deque
 
@@ -14,6 +16,7 @@ import requests
 
 from . import app_cache, broken, driver, geometry, map_shape, selector, strats_api, win
 from .aim import AimGuide, Tracker
+from .ground import GroundTracker
 from .driver import DriverError, StratsWindow
 from .minimap import MinimapReader
 from .paths import CALIBRATION_FILE
@@ -29,6 +32,7 @@ SPIKE_GONE_READS = 3     # reads in a row without the planted indicator before t
 SAME_PLANT_METRES = 3    # spikes this close together count as the same plant
 LOCK_METRES = 25        # once this close to the chosen lineup's standing spot, keep it for the round
 PREVIEW_SIZE = 360
+PLANTED_INTERVAL = 0.3   # seconds between reads once the spike is down and no lineup is open yet
 IN_POSITION_METRES = 2.0  # this close to the standing spot, the aim guide starts matching the screen
 TEST_SPIKE_CLEARANCE = 3  # test mode: a spike this close to the player is still theirs, not dropped
 AIM_IMAGE_RETRY = 5.0
@@ -273,7 +277,12 @@ class Watcher:
         self.guide = None           # the latest minimap part of the guide, which the aim tracker adds to
         self.last_aim = None
         self.tracker = None
+        self.ground = None          # GroundTracker while walking to the standing spot
+        self.last_ground = None
+        self.reader = None
         self.stop_event = None
+        self.hurry = False
+        self.strats_jobs = queue.Queue()
         self.on_log = on_log
         self.on_state = on_state or (lambda **changes: None)
         self.on_preview = on_preview
@@ -336,6 +345,16 @@ class Watcher:
         if player is not None:
             guide["metres"] = geometry.metres(map_item, player, spot)
             guide["in_position"] = guide["metres"] <= IN_POSITION_METRES
+        if guide["in_position"] or self.video is not None or self.reader is None:
+            self._stop_ground()
+        elif self.ground is None or self.ground.lineup_id != lineup["id"]:
+            self._stop_ground()
+            self.ground = GroundTracker(self.reader, map_item, spot, self._publish_ground, also_stop=self.stop_event)
+            self.ground.lineup_id = lineup["id"]
+            self.ground.registration = registration
+            self.ground.start()
+        elif registration is not None:
+            self.ground.registration = registration
         matcher = None
         if guide["in_position"]:
             matcher, guide["picture"] = self._aim_guide(lineup)
@@ -348,7 +367,7 @@ class Watcher:
             self.tracker = Tracker(matcher, self._publish_aim, also_stop=self.stop_event)
             self.tracker.lineup_id = lineup["id"]
             self.tracker.start()
-        guide["aim"] = self.last_aim
+        guide["aim"], guide["ground"] = self.last_aim, self.last_ground
         self.guide = guide
         self.on_guide(guide)
         self.guide_shown = True
@@ -357,7 +376,19 @@ class Watcher:
         """From the aim tracker's thread: redraw with the newest aim point."""
         self.last_aim = aim
         if self.guide is not None:
-            self.on_guide({**self.guide, "aim": aim})
+            self.on_guide({**self.guide, "aim": aim, "ground": self.last_ground})
+
+    def _publish_ground(self, marker):
+        """From the ground tracker's thread: redraw with the standing-spot marker where it is now."""
+        self.last_ground = marker
+        if self.guide is not None:
+            self.on_guide({**self.guide, "aim": self.last_aim, "ground": marker})
+
+    def _stop_ground(self):
+        if self.ground is not None:
+            self.ground.stop()
+            self.ground = None
+        self.last_ground = None
 
     def _stop_tracker(self):
         if self.tracker is not None:
@@ -367,23 +398,48 @@ class Watcher:
 
     def _hide_guide(self):
         self._stop_tracker()
+        self._stop_ground()
         self.guide = None
         if self.guide_shown:
             self.on_guide(None)
             self.guide_shown = False
 
+    def _drive(self, job):
+        """Run a Strats.gg job on the driving thread, after any already waiting."""
+        self.strats_jobs.put(job)
+
+    def _driving(self, stop):
+        while not stop.is_set():
+            try:
+                job = self.strats_jobs.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                job()
+            except DriverError as error:
+                self.on_log(f"Strats.gg: {error}")
+            finally:
+                self.strats_jobs.task_done()
+
     def _park(self, window, maps, agents, map_item, agent_item, side, groups):
         """Leave Strats.gg on the lineup map, so only the lineup click is left when the spike goes down."""
-        try:
+        def park():
             window.show_map(maps, agents, map_item, agent_item, side, groups)
             if self.hide:
                 window.minimize()
-        except DriverError as error:
-            self.on_log(f"Strats.gg: {error}")
+        self._drive(park)
+
+    def _open(self, window, maps, agents, map_item, agent_item, side, groups, lineup):
+        def open_lineup():
+            window.show_map(maps, agents, map_item, agent_item, side, groups)
+            if window.open_lineup(groups, selector.group_of(groups, lineup), lineup) and self.fullscreen:
+                window.fullscreen_video()
+        self._drive(open_lineup)
 
     def _load_through_app(self, window, maps, agents, map_item, agent_item, side):
         """Open this map, agent and side in Strats.gg, which loads its lineups, and read them from the app's cache."""
         self.on_log(f"No saved lineups for {map_item['name']} / {agent_item['name']} / {side}; loading them in Strats.gg.")
+        self.strats_jobs.join()          # the driving thread must be idle before Strats.gg is used here
         try:
             window.show_map(maps, agents, map_item, agent_item, side, None)
         except DriverError as error:
@@ -421,7 +477,10 @@ class Watcher:
         self.on_state(match="waiting for a match" if not manual else "", minimap="", spike="", player="", lineup="")
 
         self.stop_event = stop
-        for index, frame in enumerate(frames(self.video, self.interval, stop)):
+        if self.drive:
+            threading.Thread(target=self._driving, args=(stop,), daemon=True).start()
+        pace = self.interval if self.video is not None else (lambda: PLANTED_INTERVAL if self.hurry else self.interval)
+        for index, frame in enumerate(frames(self.video, pace, stop)):
             now = time.time() if self.video is None else index * self.interval
             if manual:
                 wanted = (self.map_name, self.agent_name, self.side or sides.side())
@@ -478,6 +537,7 @@ class Watcher:
                 groups = geometry.group_lineups(lineups)
                 contours, _ = cv2.findContours(silhouette, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
                 reader = MinimapReader(silhouette, frame.shape[0], MinimapReader.stored_scale(frame.shape))
+                self.reader = reader
                 opened = pending = last_spike = None
                 locked = False
                 used_lineups = []
@@ -580,6 +640,7 @@ class Watcher:
                 spike=("not planted" if not reading.planted else "planted, icon hidden" if reading.spike is None
                        else f"planted at {reading.spike[0]:.0f}, {reading.spike[1]:.0f}"),
             )
+            self.hurry = reading.planted and opened is None
             if not reading.planted:
                 last_spike = None
                 continue
@@ -650,11 +711,9 @@ class Watcher:
                 where += f" / you {last_player[0]:.0f},{last_player[1]:.0f}"
             self.on_log(f"Lineup: {lineup['title']} (#{lineup['id']}) for {where}")
             self.on_state(lineup=lineup["title"])
-            if not self.drive:
-                continue
-            try:
-                window.show_map(maps, agents, map_item, agent_item, target[2], groups)
-                if window.open_lineup(groups, selector.group_of(groups, lineup), lineup) and self.fullscreen:
-                    window.fullscreen_video()
-            except DriverError as error:
-                self.on_log(f"Strats.gg: {error}")
+            self.hurry = False
+            if self.on_guide is not None:
+                # The in-game guide goes up first; Strats.gg follows on its own thread.
+                self._show_guide(frame, reading, opened, map_item, reading.player or last_player)
+            if self.drive:
+                self._open(window, maps, agents, map_item, agent_item, target[2], groups, lineup)

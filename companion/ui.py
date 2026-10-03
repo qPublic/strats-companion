@@ -21,7 +21,7 @@ PANEL = "#1f2229"
 TEXT = "#e6e8ec"
 MUTED = "#8b919c"
 ACCENT = "#ff4655"
-STRATS_TOPMOST_REFRESH_MS = 3000
+STRATS_TOPMOST_REFRESH_MS = 1000
 STATE_ROWS = (("match", "Match"), ("minimap", "Minimap"), ("spike", "Spike"), ("player", "You"), ("lineup", "Lineup"))
 
 
@@ -186,12 +186,20 @@ class App:
         self.root.attributes("-topmost", self.pin_self.get())
         for hwnd, _ in win.find_windows(STRATS_TITLE):
             win.set_topmost(hwnd, self.pin_strats.get())
+        self._raise_self()
+
+    def _raise_self(self):
+        """With both pinned, keep this window above Strats.gg: the last window pinned goes on top."""
+        if self.pin_self.get():
+            win.set_topmost(int(self.root.wm_frame(), 16), True)
 
     def _keep_strats_pinned(self):
-        # Strats.gg gets a new window whenever it is restarted, so re-apply the pin.
+        # Strats.gg gets a new window whenever it is restarted, so re-apply the pin. Clicking
+        # Strats.gg also brings it in front of this window, so put this one back on top.
         if self.pin_strats.get():
             for hwnd, _ in win.find_windows(STRATS_TITLE):
                 win.set_topmost(hwnd, True)
+            self._raise_self()
         self.root.after(STRATS_TOPMOST_REFRESH_MS, self._keep_strats_pinned)
 
     # ---- display ------------------------------------------------------------

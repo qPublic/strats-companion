@@ -1,13 +1,15 @@
-"""Save the lineup data for every agent on every map ahead of time.
+"""Save the lineup data for every agent on every map ahead of time, then the aim data for their mollies.
 
 Strats.gg sometimes turns away data requests. Anything saved here keeps
 working while it does, so this runs in the background and retries until
 every combination is on disk.
 """
 
+import json
+
 import requests
 
-from . import app_cache, map_shape, strats_api
+from . import app_cache, map_shape, selector, strats_api
 
 FIRST = ("Brimstone", "Viper", "Killjoy")   # saved before the other agents
 SIDES = ("attack", "defense")
@@ -33,6 +35,24 @@ def missing():
                         f"{map_item['name']} / {agent['name']} / {side}",
                         lambda m=map_item, a=agent, s=side: strats_api.lineups(m["id"], a["id"], s),
                     ))
+    # Then the aim screenshots of every lineup the companion would pick (the agent's mollies), stored
+    # as matching features plus a small preview, so the in-game guide needs nothing at plant time.
+    for agent in agents:
+        mollies = selector.post_plant_ability_ids(agent)
+        if not mollies:
+            continue
+        for map_item in maps:
+            for side in SIDES:
+                path = strats_api.lineups_path(map_item["id"], agent["id"], side)
+                if not path.exists():
+                    continue
+                for lineup in json.loads(path.read_text(encoding="utf-8")):
+                    if lineup["status"] == "approved" and lineup["abilityId"] in mollies \
+                            and not strats_api.aim_stored(lineup["id"]):
+                        jobs.append((
+                            f"aim for {lineup['title']}",
+                            lambda lineup_id=lineup["id"]: strats_api.aim_data(lineup_id, strict=True),
+                        ))
     return jobs
 
 
@@ -49,7 +69,7 @@ def run(stop, on_log=print):
                     return
                 fetch()
                 if downloaded == 0:
-                    on_log(f"Saving lineup data for every agent on every map, {', '.join(FIRST)} first ({len(jobs)} downloads)...")
+                    on_log(f"Saving lineup and aim data for every agent on every map, {', '.join(FIRST)} first ({len(jobs)} downloads)...")
                 downloaded += 1
                 stop.wait(PAUSE_SECONDS)
         except (strats_api.Unavailable, requests.RequestException):
@@ -61,5 +81,5 @@ def run(stop, on_log=print):
             stop.wait(RETRY_SECONDS)
             continue
         if downloaded:
-            on_log("Lineup data for every agent is saved for every map.")
+            on_log("Lineup and aim data for every agent is saved for every map.")
         return

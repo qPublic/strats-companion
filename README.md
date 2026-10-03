@@ -142,7 +142,11 @@ With "Show in-game guide" ticked, the chosen lineup is drawn over the game
 The drawing ignores the mouse, never takes focus, and is kept out of screen
 captures, so the companion's own minimap reads never see it. It uses only the
 screen, never the game's memory. The aim screenshot comes from Strats.gg, or
-from the Strats.gg app's cache once the lineup has been opened there.
+from the Strats.gg app's cache once the lineup has been opened there. It is
+stored as its matching features plus a small preview (about 100 KB per lineup,
+in the cache folder's aim directory). The background download fetches these
+for every agent's mollies, and when a match starts, the stored data for its
+map, agent and side is loaded, so nothing is fetched when the spike goes down.
 
 ## Test mode
 

@@ -100,16 +100,41 @@ def _rotations(source, target):
 
 
 class AimGuide:
-    def __init__(self, reference):
+    """Everything needed to find one lineup's aim point on screen: the features of its aim screenshot.
+
+    Built from the screenshot once (`from_picture`), stored (`save`), and loaded
+    again in a few milliseconds (`load`), so nothing is fetched or computed when
+    the lineup comes up in a match.
+    """
+
+    def __init__(self, points, descriptors, size):
         self.orb = cv2.ORB_create(FEATURES)
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
-        gray = _gray(reference, WORK_WIDTH / reference.shape[1])
-        width, height = gray.shape[1], gray.shape[0]
-        self.keypoints, self.descriptors = self.orb.detectAndCompute(gray, _mask(width, height))
-        points = np.float64([keypoint.pt for keypoint in self.keypoints]).reshape(-1, 2)
-        self.bearings = _bearings(points, width, height)
-        self.near = np.hypot(points[:, 0] - width / 2, points[:, 1] - height / 2) <= NEAR_AIM * width
+        self.points = np.asarray(points, np.float64).reshape(-1, 2)
+        self.descriptors = None if descriptors is None or len(descriptors) == 0 else np.asarray(descriptors, np.uint8)
+        self.size = (int(size[0]), int(size[1]))
+        self.keypoints = self.points             # only their number and positions are used
+        width, height = self.size
+        self.bearings = _bearings(self.points, width, height)
+        self.near = np.hypot(self.points[:, 0] - width / 2, self.points[:, 1] - height / 2) <= NEAR_AIM * width
         self.random = np.random.default_rng(0)
+
+    @classmethod
+    def from_picture(cls, reference):
+        gray = _gray(reference, WORK_WIDTH / reference.shape[1])
+        keypoints, descriptors = cv2.ORB_create(FEATURES).detectAndCompute(gray, _mask(gray.shape[1], gray.shape[0]))
+        points = np.float32([keypoint.pt for keypoint in keypoints]).reshape(-1, 2)
+        return cls(points, descriptors, (gray.shape[1], gray.shape[0]))
+
+    def save(self, path):
+        descriptors = np.zeros((0, 32), np.uint8) if self.descriptors is None else self.descriptors
+        np.savez_compressed(path, points=self.points.astype(np.float32), descriptors=descriptors,
+                            size=np.array(self.size))
+
+    @classmethod
+    def load(cls, path):
+        with np.load(path) as stored:
+            return cls(stored["points"], stored["descriptors"], stored["size"])
 
     def locate(self, image, origin=(0, 0), screen=None):
         """An Aim, or None when too little of the screenshot's scenery is in view.

@@ -304,12 +304,24 @@ class Watcher:
             return known
         if known is not None and time.time() - known[1] < AIM_IMAGE_RETRY:
             return None, None
-        picture = strats_api.aim_image(lineup["id"])
-        if picture is None:
+        matcher, preview = strats_api.aim_data(lineup["id"])
+        if matcher is None:
             self.aim_guides[lineup["id"]] = (None, time.time())
             return None, None
-        self.aim_guides[lineup["id"]] = (AimGuide(picture), picture)
+        self.aim_guides[lineup["id"]] = (matcher, preview)
         return self.aim_guides[lineup["id"]]
+
+    def _preload_aims(self, lineups, agent_item):
+        """Load the stored aim data of every lineup this match could use, so none is fetched at plant time."""
+        wanted = selector.post_plant_ability_ids(agent_item)
+        loaded = 0
+        for lineup in lineups:
+            if (not wanted or lineup["abilityId"] in wanted) and strats_api.aim_stored(lineup["id"]):
+                matcher, preview = strats_api.aim_data(lineup["id"])
+                if matcher is not None:
+                    self.aim_guides[lineup["id"]] = (matcher, preview)
+                    loaded += 1
+        return loaded
 
     def _show_guide(self, frame, reading, lineup, map_item, player):
         """Tell the overlay where the standing spot is on the minimap and, once there, where to aim."""
@@ -471,6 +483,10 @@ class Watcher:
                 used_lineups = []
                 description = f"{map_item['name']} / {agent_item['name']} / {target[2]}"
                 self.on_log(f"Match: {description} ({len(lineups)} lineups)")
+                if self.on_guide is not None:
+                    ready = self._preload_aims(lineups, agent_item)
+                    if ready:
+                        self.on_log(f"Aim guide ready for {ready} of them.")
                 self.on_state(match=description, lineup="")
                 if self.drive:
                     # Set Strats.gg up now, so only the lineup click is left when the spike goes down.

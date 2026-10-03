@@ -87,34 +87,76 @@ def lineup_detail(lineup_id):
     return _cached(detail_path(lineup_id).stem, lambda: _query("valorant.lineups.byId", {"id": lineup_id}))
 
 
-def aim_image(lineup_id):
-    """The lineup's aim screenshot (BGR), or None when it has none or it cannot be had.
+AIM_DIR = CACHE_DIR / "aim"
+PREVIEW_WIDTH = 640
 
-    Fetched from cdn.strats.gg, or read from the Strats.gg app's cache: opening
-    the lineup in the app loads the full-size picture.
+
+def aim_stored(lineup_id):
+    """Whether the aim data for a lineup is on disk (or it is known to have none)."""
+    return (AIM_DIR / f"{lineup_id}.npz").exists() or (AIM_DIR / f"{lineup_id}.none").exists()
+
+
+def aim_data(lineup_id, strict=False):
+    """(AimGuide, preview picture) for a lineup's aim screenshot, or (None, None).
+
+    Stored on disk after the first time: the screenshot's features and a small
+    preview, about 100 KB, instead of the full picture. The screenshot comes
+    from cdn.strats.gg, or from the Strats.gg app's cache once the lineup has
+    been opened there. With `strict`, a refused download raises Unavailable
+    instead of giving (None, None), so a background download can wait and retry.
     """
-    path = CACHE_DIR / "images" / f"{lineup_id}.img"
-    if not path.exists():
-        try:
-            key = lineup_detail(lineup_id).get("imageKey")
-        except (Unavailable, requests.RequestException):
-            return None
-        if not key:
-            return None
-        try:
-            response = requests.get(f"{CDN_URL}/{key}", timeout=20)
-            response.raise_for_status()
-            content = response.content
-        except requests.RequestException:
-            from . import app_cache
+    from .aim import AimGuide
 
-            content = app_cache.file(key)
+    stored, preview_path = AIM_DIR / f"{lineup_id}.npz", AIM_DIR / f"{lineup_id}.jpg"
+    if stored.exists():
+        preview = cv2.imread(str(preview_path)) if preview_path.exists() else None
+        return AimGuide.load(stored), preview
+    if (AIM_DIR / f"{lineup_id}.none").exists():
+        return None, None
+    earlier = CACHE_DIR / "images" / f"{lineup_id}.img"      # full screenshots saved by version 0.18-0.21
+    if earlier.exists():
+        picture = cv2.imdecode(np.frombuffer(earlier.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+        if picture is not None:
+            return _store_aim(lineup_id, picture)
+    try:
+        key = lineup_detail(lineup_id).get("imageKey")
+    except (Unavailable, requests.RequestException):
+        if strict:
+            raise
+        return None, None
+    AIM_DIR.mkdir(parents=True, exist_ok=True)
+    if not key:
+        (AIM_DIR / f"{lineup_id}.none").touch()
+        return None, None
+    try:
+        response = requests.get(f"{CDN_URL}/{key}", timeout=20)
+        response.raise_for_status()
+        content = response.content
+    except requests.RequestException as error:
+        from . import app_cache
+
+        content = app_cache.file(key)
         if not content:
-            return None
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
-    image = cv2.imdecode(np.frombuffer(path.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
-    return image
+            if strict:
+                raise Unavailable(f"Strats.gg is refusing the aim screenshot for lineup {lineup_id}") from error
+            return None, None
+    picture = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
+    if picture is None:
+        return None, None
+    return _store_aim(lineup_id, picture)
+
+
+def _store_aim(lineup_id, picture):
+    from .aim import AimGuide
+
+    AIM_DIR.mkdir(parents=True, exist_ok=True)
+    guide = AimGuide.from_picture(picture)
+    guide.save(AIM_DIR / f"{lineup_id}.npz")
+    preview = cv2.resize(picture, (PREVIEW_WIDTH, int(PREVIEW_WIDTH * picture.shape[0] / picture.shape[1])),
+                         interpolation=cv2.INTER_AREA)
+    cv2.imwrite(str(AIM_DIR / f"{lineup_id}.jpg"), preview, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    (CACHE_DIR / "images" / f"{lineup_id}.img").unlink(missing_ok=True)
+    return guide, preview
 
 
 def lineups_path(map_id, agent_id, side):
